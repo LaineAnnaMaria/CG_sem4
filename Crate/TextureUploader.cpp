@@ -7,7 +7,7 @@
 TextureUploader::TextureUploader(ID3D12Device* device, ID3D12GraphicsCommandList* commandList) {
 	_device = device;
 	_uploadCmdList = commandList;
-    _defaultTextureKey = LoadTexture(L"../../Textures/2024-11-13_16-44-50.png")->Name;
+    _defaultTextureKey = LoadTexture(L"../Textures/checkboard.dds")->Name;
 }
 
 

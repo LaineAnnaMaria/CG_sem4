@@ -21,7 +21,7 @@
 #include "LightingUtil.hlsl"
 
 Texture2D    gDiffuseMap : register(t0);
-Texture2D    gDiffuseMap1 : register(t1);
+//Texture2D    gDiffuseMap1 : register(t1);
 SamplerState pointWrap  : register(s0);
 SamplerState pointClamp  : register(s1);
 SamplerState linearWrap  : register(s2);
@@ -115,9 +115,9 @@ float4 PS(VertexOut pin) : SV_Target
                 uv.x * sin(gTotalTime) - uv.y * cos(gTotalTime));
     UV += float2(0.5f, 0.5f);
 
-    float4 diffuseAlbedo0 = gDiffuseMap.Sample(anisotropicClamp, (UV));
-    float4 diffuseAlbedo1 = gDiffuseMap1.Sample(anisotropicClamp, (pin.TexC));
-    float4 diffuseAlbedo = diffuseAlbedo0 * diffuseAlbedo1;
+    //float4 diffuseAlbedo0 = gDiffuseMap.Sample(anisotropicClamp, (UV));
+    //float4 diffuseAlbedo1 = gDiffuseMap1.Sample(anisotropicClamp, (pin.TexC));
+    float4 diffuseAlbedo = gDiffuseMap.Sample(anisotropicClamp, pin.TexC);
 
 
 
