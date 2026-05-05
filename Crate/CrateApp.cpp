@@ -106,6 +106,8 @@ private:
     UINT mCbvSrvDescriptorSize = 0;
 
     ComPtr<ID3D12RootSignature> mRootSignature = nullptr;
+    ComPtr<ID3D12RootSignature> _dummyRootSignature = nullptr;
+
 
     ComPtr<ID3D12DescriptorHeap> mSrvDescriptorHeap = nullptr;
 
@@ -116,6 +118,8 @@ private:
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
 
     ComPtr<ID3D12PipelineState> mOpaquePSO = nullptr;
+    ComPtr<ID3D12PipelineState> _dummyPSO = nullptr;
+
 
     // List of all the render items.
     std::vector<std::unique_ptr<RenderItem>> mAllRitems;
@@ -299,6 +303,12 @@ void CrateApp::Draw(const GameTimer& gt)
 
     // Specify the buffers we are going to render to.
     mCommandList->OMSetRenderTargets(1, &CurrentBackBufferView(), true, &DepthStencilView());
+
+    mCommandList->SetPipelineState(_dummyPSO.Get());
+
+    mCommandList->SetGraphicsRootSignature(_dummyRootSignature.Get());
+
+    mCommandList->DrawInstanced(3, 1, 0, 0);
 
     // Indicate a state transition on the resource usage.
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
@@ -521,6 +531,29 @@ void CrateApp::BuildRootSignature()
         serializedRootSig->GetBufferPointer(),
         serializedRootSig->GetBufferSize(),
         IID_PPV_ARGS(mRootSignature.GetAddressOf())));
+
+    //dummy root signature
+    CD3DX12_ROOT_SIGNATURE_DESC dummyRootSigDesc(0, nullptr,
+        0, nullptr,
+        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+    // create a root signature with a single slot which points to a descriptor range consisting of a single constant buffer
+    serializedRootSig = nullptr;
+    errorBlob = nullptr;
+    hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+        serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
+
+    if (errorBlob != nullptr)
+    {
+        ::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+    }
+    ThrowIfFailed(hr);
+
+    ThrowIfFailed(md3dDevice->CreateRootSignature(
+        0,
+        serializedRootSig->GetBufferPointer(),
+        serializedRootSig->GetBufferSize(),
+        IID_PPV_ARGS(_dummyRootSignature.GetAddressOf())));
 }
 
 void CrateApp::BuildDescriptorHeaps()
@@ -579,6 +612,9 @@ void CrateApp::BuildShadersAndInputLayout()
 {
     mShaders["standardVS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "VS", "vs_5_0");
     mShaders["opaquePS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "PS", "ps_5_0");
+
+    mShaders["dummyVS"] = d3dUtil::CompileShader(L"Shaders\\Dummy.hlsl", nullptr, "VS", "vs_5_0");
+    mShaders["dummyPS"] = d3dUtil::CompileShader(L"Shaders\\Dummy.hlsl", nullptr, "PS", "ps_5_0");
 
     mInputLayout =
     {
@@ -686,6 +722,28 @@ void CrateApp::BuildPSOs()
     opaquePsoDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
     opaquePsoDesc.DSVFormat = mDepthStencilFormat;
     ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&opaquePsoDesc, IID_PPV_ARGS(&mOpaquePSO)));
+
+    //dummy pso
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC dummyPsoDesc = opaquePsoDesc;
+    dummyPsoDesc.InputLayout = {};
+    dummyPsoDesc.pRootSignature = _dummyRootSignature.Get();
+    dummyPsoDesc.VS =
+    {
+        reinterpret_cast<BYTE*>(mShaders["dummyVS"]->GetBufferPointer()),
+        mShaders["dummyVS"]->GetBufferSize()
+    };
+    dummyPsoDesc.PS =
+    {
+        reinterpret_cast<BYTE*>(mShaders["dummyPS"]->GetBufferPointer()),
+        mShaders["dummyPS"]->GetBufferSize()
+    };
+    dummyPsoDesc.NumRenderTargets = 1;
+    for (int i = 0; i < GBuffer::InfoCount(); i++)
+    {
+        dummyPsoDesc.RTVFormats[i] = DXGI_FORMAT_UNKNOWN;
+    }
+    dummyPsoDesc.RTVFormats[0] = mBackBufferFormat;
+    ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&dummyPsoDesc, IID_PPV_ARGS(&_dummyPSO)));
 }
 
 void CrateApp::BuildFrameResources()

@@ -23,7 +23,7 @@
 struct GBuffer {
     float4 diffuse:SV_Target0;
     float4 normal:SV_Target1;
-}
+};
 
 Texture2D    gDiffuseMap : register(t0);
 //Texture2D    gDiffuseMap1 : register(t1);
@@ -131,7 +131,7 @@ GBuffer PS(VertexOut pin)
     // Interpolating normal can unnormalize it, so renormalize it.
     pin.NormalW = normalize(pin.NormalW);
 
-    output.normal = pin.NormalW;
+    output.normal = float4(pin.NormalW, 1);
 
     // Vector from point being lit to eye. 
     float3 toEyeW = normalize(gEyePosW - pin.PosW);
