@@ -20,6 +20,11 @@
 // Include structures and functions for lighting.
 #include "LightingUtil.hlsl"
 
+struct GBuffer {
+    float4 diffuse:SV_Target0;
+    float4 normal:SV_Target1;
+}
+
 Texture2D    gDiffuseMap : register(t0);
 //Texture2D    gDiffuseMap1 : register(t1);
 SamplerState pointWrap  : register(s0);
@@ -107,8 +112,10 @@ VertexOut VS(VertexIn vin)
     return vout;
 }
 
-float4 PS(VertexOut pin) : SV_Target
+GBuffer PS(VertexOut pin)
 {
+    
+    GBuffer output;
 
     float2 uv = pin.TexC - float2(0.5f, 0.5f);
     float2 UV = float2(uv.x * cos(gTotalTime) + uv.y * sin(gTotalTime),
@@ -119,10 +126,12 @@ float4 PS(VertexOut pin) : SV_Target
     //float4 diffuseAlbedo1 = gDiffuseMap1.Sample(anisotropicClamp, (pin.TexC));
     float4 diffuseAlbedo = gDiffuseMap.Sample(anisotropicClamp, pin.TexC);
 
-
+    output.diffuse = diffuseAlbedo;
 
     // Interpolating normal can unnormalize it, so renormalize it.
     pin.NormalW = normalize(pin.NormalW);
+
+    output.normal = pin.NormalW;
 
     // Vector from point being lit to eye. 
     float3 toEyeW = normalize(gEyePosW - pin.PosW);
@@ -141,7 +150,7 @@ float4 PS(VertexOut pin) : SV_Target
     // Common convention to take alpha from diffuse material.
     litColor.a = diffuseAlbedo.a;
 
-    return litColor;
+    return output;
 }
 
 
