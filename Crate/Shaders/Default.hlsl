@@ -102,22 +102,17 @@ VertexOut VS(VertexIn vin)
 	
 	// Output vertex attributes for interpolation across triangle.
     float4 texC = mul(float4(vin.TexC, 0.0f, 1.0f), gTexTransform);
-    vout.TexC = mul(texC, gMatTransform).xy;
-
+    float2 uv = vin.TexC;
+    uv += float2(gTotalTime * 0.1f, 0.0f);
+    vout.TexC = mul(uv, gMatTransform).xy;
+    
     return vout;
 }
 
 float4 PS(VertexOut pin) : SV_Target
 {
 
-    float2 uv = pin.TexC - float2(0.5f, 0.5f);
-    float2 UV = float2(uv.x * cos(gTotalTime) + uv.y * sin(gTotalTime),
-                uv.x * sin(gTotalTime) - uv.y * cos(gTotalTime));
-    UV += float2(0.5f, 0.5f);
-
-    //float4 diffuseAlbedo0 = gDiffuseMap.Sample(anisotropicClamp, (UV));
-    //float4 diffuseAlbedo1 = gDiffuseMap1.Sample(anisotropicClamp, (pin.TexC));
-    float4 diffuseAlbedo = gDiffuseMap.Sample(anisotropicClamp, pin.TexC);
+    float4 diffuseAlbedo = gDiffuseMap.Sample(anisotropicWrap, pin.TexC);
 
 
 
