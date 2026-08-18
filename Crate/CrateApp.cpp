@@ -94,6 +94,7 @@ private:
     void BuildMaterials();
     void BuildRenderItems();
     void DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems);
+    void DrawDirLight();
 
     std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> GetStaticSamplers();
 
@@ -106,7 +107,7 @@ private:
     UINT mCbvSrvDescriptorSize = 0;
 
     ComPtr<ID3D12RootSignature> mRootSignature = nullptr;
-    ComPtr<ID3D12RootSignature> _dummyRootSignature = nullptr;
+    ComPtr<ID3D12RootSignature> _dirLightRootSignature = nullptr;
 
 
     ComPtr<ID3D12DescriptorHeap> mSrvDescriptorHeap = nullptr;
@@ -118,7 +119,7 @@ private:
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
 
     ComPtr<ID3D12PipelineState> mOpaquePSO = nullptr;
-    ComPtr<ID3D12PipelineState> _dummyPSO = nullptr;
+    ComPtr<ID3D12PipelineState> _dirLightPSO = nullptr;
 
 
     // List of all the render items.
@@ -302,13 +303,9 @@ void CrateApp::Draw(const GameTimer& gt)
     mCommandList->ClearDepthStencilView(DepthStencilView(), D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
 
     // Specify the buffers we are going to render to.
-    mCommandList->OMSetRenderTargets(1, &CurrentBackBufferView(), true, &DepthStencilView());
+    mCommandList->OMSetRenderTargets(1, &CurrentBackBufferView(), true, nullptr);
 
-    mCommandList->SetPipelineState(_dummyPSO.Get());
-
-    mCommandList->SetGraphicsRootSignature(_dummyRootSignature.Get());
-
-    mCommandList->DrawInstanced(3, 1, 0, 0);
+    DrawDirLight();
 
     // Indicate a state transition on the resource usage.
     mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
@@ -477,16 +474,18 @@ void CrateApp::UpdateMainPassCB(const GameTimer& gt)
     mMainPassCB.FarZ = 5000.0f;
     mMainPassCB.TotalTime = gt.TotalTime();
     mMainPassCB.DeltaTime = gt.DeltaTime();
-    mMainPassCB.AmbientLight = { 0.25f, 0.25f, 0.35f, 1.0f };
-    mMainPassCB.Lights[0].Direction = { 0.57735f, -0.57735f, 0.57735f };
-    mMainPassCB.Lights[0].Strength = { 0.6f, 0.6f, 0.6f };
-    mMainPassCB.Lights[1].Direction = { -0.57735f, -0.57735f, 0.57735f };
-    mMainPassCB.Lights[1].Strength = { 0.3f, 0.3f, 0.3f };
-    mMainPassCB.Lights[2].Direction = { 0.0f, -0.707f, -0.707f };
-    mMainPassCB.Lights[2].Strength = { 0.15f, 0.15f, 0.15f };
 
     auto currPassCB = mCurrFrameResource->PassCB.get();
     currPassCB->CopyData(0, mMainPassCB);
+
+    auto currDirLightCB = mCurrFrameResource->DirLightCB.get();
+
+    DirLightConstants dirLightConstants;
+    dirLightConstants.direction = { 1.f, 1.f, 1.f };
+
+
+    currDirLightCB->CopyData(0, dirLightConstants);
+
 }
 
 void CrateApp::LoadTextures()
@@ -495,65 +494,83 @@ void CrateApp::LoadTextures()
 
 void CrateApp::BuildRootSignature()
 {
-    CD3DX12_DESCRIPTOR_RANGE texTable;
-    texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
-
-    // Root parameter can be a table, root descriptor or root constants.
-    CD3DX12_ROOT_PARAMETER slotRootParameter[4];
-
-    // Perfomance TIP: Order from most frequent to least frequent.
-    slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);
-    slotRootParameter[1].InitAsConstantBufferView(0);
-    slotRootParameter[2].InitAsConstantBufferView(1);
-    slotRootParameter[3].InitAsConstantBufferView(2);
-
-    auto staticSamplers = GetStaticSamplers();
-
-    // A root signature is an array of root parameters.
-    CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(4, slotRootParameter,
-        (UINT)staticSamplers.size(), staticSamplers.data(),
-        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
-
-    // create a root signature with a single slot which points to a descriptor range consisting of a single constant buffer
-    ComPtr<ID3DBlob> serializedRootSig = nullptr;
-    ComPtr<ID3DBlob> errorBlob = nullptr;
-    HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
-        serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
-
-    if (errorBlob != nullptr)
     {
-        ::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+        CD3DX12_DESCRIPTOR_RANGE texTable;
+        texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+
+        // Root parameter can be a table, root descriptor or root constants.
+        CD3DX12_ROOT_PARAMETER slotRootParameter[4];
+
+        // Perfomance TIP: Order from most frequent to least frequent.
+        slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);
+        slotRootParameter[1].InitAsConstantBufferView(0);
+        slotRootParameter[2].InitAsConstantBufferView(1);
+        slotRootParameter[3].InitAsConstantBufferView(2);
+
+        auto staticSamplers = GetStaticSamplers();
+
+        // A root signature is an array of root parameters.
+        CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(4, slotRootParameter,
+            (UINT)staticSamplers.size(), staticSamplers.data(),
+            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+        // create a root signature with a single slot which points to a descriptor range consisting of a single constant buffer
+        ComPtr<ID3DBlob> serializedRootSig = nullptr;
+        ComPtr<ID3DBlob> errorBlob = nullptr;
+        HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+            serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
+
+        if (errorBlob != nullptr)
+        {
+            ::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+        }
+        ThrowIfFailed(hr);
+
+        ThrowIfFailed(md3dDevice->CreateRootSignature(
+            0,
+            serializedRootSig->GetBufferPointer(),
+            serializedRootSig->GetBufferSize(),
+            IID_PPV_ARGS(mRootSignature.GetAddressOf())));
     }
-    ThrowIfFailed(hr);
 
-    ThrowIfFailed(md3dDevice->CreateRootSignature(
-        0,
-        serializedRootSig->GetBufferPointer(),
-        serializedRootSig->GetBufferSize(),
-        IID_PPV_ARGS(mRootSignature.GetAddressOf())));
-
-    //dummy root signature
-    CD3DX12_ROOT_SIGNATURE_DESC dummyRootSigDesc(0, nullptr,
-        0, nullptr,
-        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
-
-    // create a root signature with a single slot which points to a descriptor range consisting of a single constant buffer
-    serializedRootSig = nullptr;
-    errorBlob = nullptr;
-    hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
-        serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
-
-    if (errorBlob != nullptr)
     {
-        ::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
-    }
-    ThrowIfFailed(hr);
+        // root signature for dir light
 
-    ThrowIfFailed(md3dDevice->CreateRootSignature(
-        0,
-        serializedRootSig->GetBufferPointer(),
-        serializedRootSig->GetBufferSize(),
-        IID_PPV_ARGS(_dummyRootSignature.GetAddressOf())));
+        CD3DX12_DESCRIPTOR_RANGE texTable[3];
+        texTable[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+        texTable[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
+        texTable[2].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2);
+
+        // Root parameter can be a table, root descriptor or root constants.
+        CD3DX12_ROOT_PARAMETER slotRootParameter[2];
+
+        // Perfomance TIP: Order from most frequent to least frequent.
+        slotRootParameter[0].InitAsDescriptorTable(3, texTable, D3D12_SHADER_VISIBILITY_PIXEL);
+        slotRootParameter[1].InitAsConstantBufferView(0);
+
+        // A root signature is an array of root parameters.
+        CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(2, slotRootParameter,
+            0, nullptr,
+            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+        // create a root signature with a single slot which points to a descriptor range consisting of a single constant buffer
+        ComPtr<ID3DBlob> serializedRootSig = nullptr;
+        ComPtr<ID3DBlob> errorBlob = nullptr;
+        HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+            serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
+
+        if (errorBlob != nullptr)
+        {
+            ::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+        }
+        ThrowIfFailed(hr);
+
+        ThrowIfFailed(md3dDevice->CreateRootSignature(
+            0,
+            serializedRootSig->GetBufferPointer(),
+            serializedRootSig->GetBufferSize(),
+            IID_PPV_ARGS(_dirLightRootSignature.GetAddressOf())));
+    }
 }
 
 void CrateApp::BuildDescriptorHeaps()
@@ -613,8 +630,8 @@ void CrateApp::BuildShadersAndInputLayout()
     mShaders["standardVS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "VS", "vs_5_0");
     mShaders["opaquePS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "PS", "ps_5_0");
 
-    mShaders["dummyVS"] = d3dUtil::CompileShader(L"Shaders\\Dummy.hlsl", nullptr, "VS", "vs_5_0");
-    mShaders["dummyPS"] = d3dUtil::CompileShader(L"Shaders\\Dummy.hlsl", nullptr, "PS", "ps_5_0");
+    mShaders["dirLightVS"] = d3dUtil::CompileShader(L"Shaders\\DirLight.hlsl", nullptr, "VS", "vs_5_0");
+    mShaders["dirLightPS"] = d3dUtil::CompileShader(L"Shaders\\DirLight.hlsl", nullptr, "PS", "ps_5_0");
 
     mInputLayout =
     {
@@ -716,34 +733,40 @@ void CrateApp::BuildPSOs()
     opaquePsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     opaquePsoDesc.SampleMask = UINT_MAX;
     opaquePsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    opaquePsoDesc.NumRenderTargets = 1;
-    opaquePsoDesc.RTVFormats[0] = mBackBufferFormat;
+    opaquePsoDesc.NumRenderTargets = GBuffer::InfoCount();
+    for (int i = 0; i < GBuffer::InfoCount(); i++) {
+        opaquePsoDesc.RTVFormats[i] = GBuffer::infoFormats[i];
+    }
     opaquePsoDesc.SampleDesc.Count = m4xMsaaState ? 4 : 1;
     opaquePsoDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
     opaquePsoDesc.DSVFormat = mDepthStencilFormat;
     ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&opaquePsoDesc, IID_PPV_ARGS(&mOpaquePSO)));
 
-    //dummy pso
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC dummyPsoDesc = opaquePsoDesc;
-    dummyPsoDesc.InputLayout = {};
-    dummyPsoDesc.pRootSignature = _dummyRootSignature.Get();
-    dummyPsoDesc.VS =
+    //dir light pso
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC dirLightPsoDesc = opaquePsoDesc;
+    dirLightPsoDesc.InputLayout = {};
+    dirLightPsoDesc.pRootSignature = _dirLightRootSignature.Get();
+    dirLightPsoDesc.VS =
     {
-        reinterpret_cast<BYTE*>(mShaders["dummyVS"]->GetBufferPointer()),
-        mShaders["dummyVS"]->GetBufferSize()
+        reinterpret_cast<BYTE*>(mShaders["dirLightVS"]->GetBufferPointer()),
+        mShaders["dirLightVS"]->GetBufferSize()
     };
-    dummyPsoDesc.PS =
+    dirLightPsoDesc.PS =
     {
-        reinterpret_cast<BYTE*>(mShaders["dummyPS"]->GetBufferPointer()),
-        mShaders["dummyPS"]->GetBufferSize()
+        reinterpret_cast<BYTE*>(mShaders["dirLightPS"]->GetBufferPointer()),
+        mShaders["dirLightPS"]->GetBufferSize()
     };
-    dummyPsoDesc.NumRenderTargets = 1;
+    dirLightPsoDesc.NumRenderTargets = 1;
     for (int i = 0; i < GBuffer::InfoCount(); i++)
     {
-        dummyPsoDesc.RTVFormats[i] = DXGI_FORMAT_UNKNOWN;
+        dirLightPsoDesc.RTVFormats[i] = DXGI_FORMAT_UNKNOWN;
     }
-    dummyPsoDesc.RTVFormats[0] = mBackBufferFormat;
-    ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&dummyPsoDesc, IID_PPV_ARGS(&_dummyPSO)));
+    dirLightPsoDesc.RTVFormats[0] = mBackBufferFormat;
+
+    dirLightPsoDesc.DepthStencilState.DepthEnable = false;
+    dirLightPsoDesc.DepthStencilState.StencilEnable = false;
+
+    ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&dirLightPsoDesc, IID_PPV_ARGS(&_dirLightPSO)));
 }
 
 void CrateApp::BuildFrameResources()
@@ -845,6 +868,32 @@ void CrateApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::ve
 
         cmdList->DrawIndexedInstanced(ri->IndexCount, 1, ri->StartIndexLocation, ri->BaseVertexLocation, 0);
     }
+}
+
+void CrateApp::DrawDirLight()
+{
+    mCommandList->SetPipelineState(_dirLightPSO.Get());
+
+    mCommandList->SetGraphicsRootSignature(_dirLightRootSignature.Get());
+
+    ID3D12DescriptorHeap* descriptorHeaps[] = { _gBuffer->SRVHeap()};
+    mCommandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
+
+    _gBuffer->ChangeRTVsState(D3D12_RESOURCE_STATE_COMMON);
+    _gBuffer->ChangeDSVState(D3D12_RESOURCE_STATE_DEPTH_READ);
+
+    CD3DX12_GPU_DESCRIPTOR_HANDLE tex(_gBuffer->SRVHeap()->GetGPUDescriptorHandleForHeapStart());
+
+    mCommandList->SetGraphicsRootDescriptorTable(0, tex);
+
+    auto DirLightCB = mCurrFrameResource->DirLightCB->Resource();
+
+    D3D12_GPU_VIRTUAL_ADDRESS dirLightCBAddress = DirLightCB->GetGPUVirtualAddress();
+
+    mCommandList->SetGraphicsRootConstantBufferView(1, dirLightCBAddress);
+
+
+    mCommandList->DrawInstanced(3, 1, 0, 0);
 }
 
 std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> CrateApp::GetStaticSamplers()

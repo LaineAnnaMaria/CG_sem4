@@ -59,13 +59,6 @@ cbuffer cbPass : register(b1)
     float gFarZ;
     float gTotalTime;
     float gDeltaTime;
-    float4 gAmbientLight;
-
-    // Indices [0, NUM_DIR_LIGHTS) are directional lights;
-    // indices [NUM_DIR_LIGHTS, NUM_DIR_LIGHTS+NUM_POINT_LIGHTS) are point lights;
-    // indices [NUM_DIR_LIGHTS+NUM_POINT_LIGHTS, NUM_DIR_LIGHTS+NUM_POINT_LIGHT+NUM_SPOT_LIGHTS)
-    // are spot lights for a maximum of MaxLights per object.
-    Light gLights[MaxLights];
 };
 
 cbuffer cbMaterial : register(b2)
@@ -116,14 +109,7 @@ GBuffer PS(VertexOut pin)
 {
     
     GBuffer output;
-
-    float2 uv = pin.TexC - float2(0.5f, 0.5f);
-    float2 UV = float2(uv.x * cos(gTotalTime) + uv.y * sin(gTotalTime),
-                uv.x * sin(gTotalTime) - uv.y * cos(gTotalTime));
-    UV += float2(0.5f, 0.5f);
-
-    //float4 diffuseAlbedo0 = gDiffuseMap.Sample(anisotropicClamp, (UV));
-    //float4 diffuseAlbedo1 = gDiffuseMap1.Sample(anisotropicClamp, (pin.TexC));
+    
     float4 diffuseAlbedo = gDiffuseMap.Sample(anisotropicClamp, pin.TexC);
 
     output.diffuse = diffuseAlbedo;
@@ -132,23 +118,6 @@ GBuffer PS(VertexOut pin)
     pin.NormalW = normalize(pin.NormalW);
 
     output.normal = float4(pin.NormalW, 1);
-
-    // Vector from point being lit to eye. 
-    float3 toEyeW = normalize(gEyePosW - pin.PosW);
-
-    // Light terms.
-    float4 ambient = gAmbientLight*diffuseAlbedo;
-
-    const float shininess = 1.0f - gRoughness;
-    Material mat = { diffuseAlbedo, gFresnelR0, shininess };
-    float3 shadowFactor = 1.0f;
-    float4 directLight = ComputeLighting(gLights, mat, pin.PosW,
-        pin.NormalW, toEyeW, shadowFactor);
-
-    float4 litColor = ambient + directLight;
-
-    // Common convention to take alpha from diffuse material.
-    litColor.a = diffuseAlbedo.a;
 
     return output;
 }

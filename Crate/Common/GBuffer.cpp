@@ -109,6 +109,8 @@ void GBuffer::CreateGBufferTexture(int i, CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHeapH
 		&heapProps, D3D12_HEAP_FLAG_NONE, &texDesc, D3D12_RESOURCE_STATE_COMMON,
 		&clearValue, IID_PPV_ARGS(&_info[i].Resource)));
 
+	_info[i].prevState = D3D12_RESOURCE_STATE_COMMON;
+
 	if (isDSV)
 	{
 		D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
