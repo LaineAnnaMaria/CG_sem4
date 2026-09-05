@@ -19,7 +19,11 @@ Texture* TextureUploader::LoadTexture(const std::wstring& filename)
     Texture* texPtr = tex.get();
     if (CreateTexture(texPtr) == false)
     {
-        OutputDebugStringA(("Failed to load texture: " + std::string(filename.begin(), filename.end()) + ". Using fallback texture.\n").c_str());
+        std::string narrowFilename;
+        narrowFilename.reserve(filename.size());
+        for (const wchar_t character : filename)
+            narrowFilename.push_back(static_cast<char>(character));
+        OutputDebugStringA(("Failed to load texture: " + narrowFilename + ". Using fallback texture.\n").c_str());
         return _textures[_defaultTextureKey].get();
     }
 
@@ -59,7 +63,7 @@ bool TextureUploader::CreateTexture(Texture* tex)
         DirectX::TexMetadata metadata;
         DirectX::ScratchImage scratch;
 
-        HRESULT res;
+        long res;
 
         if (ext == L"tga") {
 

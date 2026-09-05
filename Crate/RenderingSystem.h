@@ -49,8 +49,8 @@ private:
 
     void BuildRootSignatures(ID3D12Device* device);
     void BuildShaders();
-    void BuildPSOs(const BuildContext& context);
-    std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> GetStaticSamplers() const;
+    void BuildPsOs(const BuildContext& context);
+    static std::vector<CD3DX12_STATIC_SAMPLER_DESC> GetStaticSamplers();
 
 private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> _geometryRootSignature = nullptr;

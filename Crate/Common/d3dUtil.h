@@ -94,7 +94,7 @@ public:
 
     static bool IsKeyDown(int vkeyCode);
 
-    static std::string ToString(HRESULT hr);
+    static std::string ToString(long errorCode);
 
     static UINT CalcConstantBufferByteSize(UINT byteSize)
     {
@@ -132,11 +132,11 @@ class DxException
 {
 public:
     DxException() = default;
-    DxException(HRESULT hr, const std::wstring& functionName, const std::wstring& filename, int lineNumber);
+    DxException(long errorCode, const std::wstring& functionName, const std::wstring& filename, int lineNumber);
 
     std::wstring ToString()const;
 
-    HRESULT ErrorCode = S_OK;
+    long ErrorCode = S_OK;
     std::wstring FunctionName;
     std::wstring Filename;
     int LineNumber = -1;
@@ -152,6 +152,7 @@ struct SubmeshGeometry
     UINT StartIndexLocation = 0;
     INT BaseVertexLocation = 0;
     UINT MaterialIndex = 0;
+    UINT ModelIndex = 0;
 
     // Bounding box of the geometry defined by this submesh. 
     // This is used in later chapters of the book.
@@ -233,13 +234,26 @@ struct MaterialConstants
 
     // Used in texture mapping.
     DirectX::XMFLOAT4X4 MatTransform = MathHelper::Identity4x4();
+
+    // Tessellation and displacement settings.
+    float DisplacementScale = 0.8f;
+    float MinTessDistance = 20.0f;
+    float MaxTessDistance = 90.0f;
+    float MinTessFactor = 1.0f;
+    float MaxTessFactor = 16.0f;
+    int UseNormalMap = 0;
+    int UseDisplacementMap = 0;
+    float Pad0 = 0.0f;
 };
 
 // Simple struct to represent a material for our demos.  A production 3D engine
 // would likely create a class hierarchy of Materials.
 struct Material
 {
+    std::string TextureDirectory;
     std::string TexturePath;
+    std::string NormalTexturePath;
+    std::string DisplacementTexturePath;
     // Unique material name for lookup.
     std::string Name;
 
@@ -252,6 +266,9 @@ struct Material
     // Index into SRV heap for normal texture.
     int NormalSrvHeapIndex = -1;
 
+    // Index into SRV heap for displacement texture.
+    int DisplacementSrvHeapIndex = -1;
+
     // Dirty flag indicating the material has changed and we need to update the constant buffer.
     // Because we have a material constant buffer for each FrameResource, we have to apply the
     // update to each FrameResource.  Thus, when we modify a material we should set 
@@ -263,6 +280,11 @@ struct Material
     DirectX::XMFLOAT3 FresnelR0 = { 0.01f, 0.01f, 0.01f };
     float Roughness = .25f;
     DirectX::XMFLOAT4X4 MatTransform = MathHelper::Identity4x4();
+    float DisplacementScale = 0.8f;
+    float MinTessDistance = 20.0f;
+    float MaxTessDistance = 90.0f;
+    float MinTessFactor = 1.0f;
+    float MaxTessFactor = 16.0f;
 };
 
 struct Texture
@@ -279,7 +301,7 @@ struct Texture
 #ifndef ThrowIfFailed
 #define ThrowIfFailed(x)                                              \
 {                                                                     \
-    HRESULT hr__ = (x);                                               \
+    const auto hr__ = (x);                                            \
     std::wstring wfn = AnsiToWString(__FILE__);                       \
     if(FAILED(hr__)) { throw DxException(hr__, L#x, wfn, __LINE__); } \
 }

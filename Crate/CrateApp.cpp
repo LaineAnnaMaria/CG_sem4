@@ -9,7 +9,12 @@
 #include "FrameResource.h"
 #include "RenderingSystem.h"
 #include "TextureUploader.h"
-#include <filesystem>
+#include "imgui/imgui.h"
+#include "imgui/backends/imgui_impl_dx12.h"
+#include "imgui/backends/imgui_impl_win32.h"
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
+    HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
 
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
@@ -52,6 +57,19 @@ struct RenderItem
     UINT IndexCount = 0;
     UINT StartIndexLocation = 0;
     int BaseVertexLocation = 0;
+    UINT ModelIndex = 0;
+};
+
+struct LoadedModel
+{
+    std::unique_ptr<Assimp::Importer> Importer;
+    const aiScene* Scene = nullptr;
+    std::string Directory;
+    std::string Name;
+    XMFLOAT4X4 World = MathHelper::Identity4x4();
+    UINT MaterialOffset = 0;
+    bool UseDetailMaps = false;
+    bool Visible = true;
 };
 
 class CrateApp : public D3DApp
@@ -63,12 +81,11 @@ public:
     ~CrateApp();
 
     virtual bool Initialize()override;
+    virtual LRESULT MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) override;
 
 private:
 
-    Assimp::Importer mImporter;
-    const aiScene* mScene = nullptr;
-    std::string mModelDir;
+    std::vector<LoadedModel> mModels;
 
     virtual void OnResize()override;
     virtual void Update(const GameTimer& gt)override;
@@ -96,8 +113,10 @@ private:
     void BuildLights();
     void BuildRenderItems();
     void DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems);
+    void InitializeImGui();
+    void DrawImGui();
 
-    std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> GetStaticSamplers();
+    std::vector<CD3DX12_STATIC_SAMPLER_DESC> GetStaticSamplers();
 
 private:
 
@@ -108,6 +127,7 @@ private:
     UINT mCbvSrvDescriptorSize = 0;
 
     ComPtr<ID3D12DescriptorHeap> mSrvDescriptorHeap = nullptr;
+    ComPtr<ID3D12DescriptorHeap> mImGuiSrvDescriptorHeap = nullptr;
 
     std::unordered_map<std::string, std::unique_ptr<MeshGeometry>> mGeometries;
     std::unordered_map<std::string, std::unique_ptr<Material>> mMaterials;
@@ -132,7 +152,8 @@ private:
 
     float mTheta = 1.3f * XM_PI;
     float mPhi = 0.4f * XM_PI;
-    float mRadius = 85.0f;
+    float mRadius = 100.0f;
+    float mWalnutDisplacementScale = 1.5f;
 
     POINT mLastMousePos;
     TextureUploader _textureLoader;
@@ -172,6 +193,13 @@ CrateApp::~CrateApp()
 {
     if (md3dDevice != nullptr)
         FlushCommandQueue();
+
+    if (ImGui::GetCurrentContext() != nullptr)
+    {
+        ImGui_ImplDX12_Shutdown();
+        ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+    }
 }
 
 
@@ -187,25 +215,49 @@ bool CrateApp::Initialize()
     // so we have to query this information.
     mCbvSrvDescriptorSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-    mModelDir = "sponza/";
     _textureLoader = TextureUploader(md3dDevice.Get(), mCommandList.Get());
     mRenderingSystem = std::make_unique<RenderingSystem>();
 
-    mScene = mImporter.ReadFile(
-        "sponza/sponza.obj",
-        aiProcess_Triangulate |
+    const unsigned int importFlags = aiProcess_Triangulate |
         aiProcess_JoinIdenticalVertices |
         aiProcess_FlipUVs |
         aiProcess_GenNormals |
+        aiProcess_CalcTangentSpace |
         aiProcess_MakeLeftHanded |
         aiProcess_FlipWindingOrder |
-        aiProcess_GenUVCoords);
+        aiProcess_GenUVCoords;
 
-    if (!mScene || mScene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !mScene->mRootNode)
+    auto loadModel = [this, importFlags](const std::string& name, const std::string& filename,
+        const std::string& directory, FXMMATRIX world, bool useDetailMaps)
     {
-        ::OutputDebugStringA(mImporter.GetErrorString());
-        throw std::runtime_error(mImporter.GetErrorString());
+        LoadedModel model;
+        model.Importer = std::make_unique<Assimp::Importer>();
+        model.Scene = model.Importer->ReadFile(filename, importFlags);
+        if (!model.Scene || (model.Scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !model.Scene->mRootNode)
+        {
+            const std::string error = model.Importer->GetErrorString();
+            ::OutputDebugStringA(error.c_str());
+            throw std::runtime_error(error);
+        }
 
+        model.Directory = directory;
+        model.Name = name;
+        model.UseDetailMaps = useDetailMaps;
+        XMStoreFloat4x4(&model.World, world);
+        mModels.push_back(std::move(model));
+    };
+
+    // Sponza remains the environment; the detailed walnut rests on its central floor.
+    loadModel("Sponza", "sponza/sponza.obj", "sponza/",
+        XMMatrixScaling(0.1f, 0.1f, 0.1f) * XMMatrixTranslation(0.0f, 13.0f, 0.0f), false);
+    loadModel("Walnut", "Assets/Walnut/walnut.obj", "Assets/Walnut/",
+        XMMatrixScaling(1.25f, 1.25f, 1.25f) * XMMatrixTranslation(0.0f, -3.8f, 0.0f), true);
+
+    UINT materialOffset = 0;
+    for (LoadedModel& model : mModels)
+    {
+        model.MaterialOffset = materialOffset;
+        materialOffset += model.Scene->mNumMaterials;
     }
     BuildShadersAndInputLayout();
     BuildShapeGeometry();
@@ -228,12 +280,25 @@ bool CrateApp::Initialize()
     // Execute the initialization commands.
     ThrowIfFailed(mCommandList->Close());
     ID3D12CommandList* cmdsLists[] = { mCommandList.Get() };
-    mCommandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
+    mCommandQueue->ExecuteCommandLists(1, cmdsLists);
 
     // Wait until initialization is complete.
     FlushCommandQueue();
 
+    InitializeImGui();
+
     return true;
+}
+
+LRESULT CrateApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (ImGui::GetCurrentContext() != nullptr &&
+        ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam))
+    {
+        return 1;
+    }
+
+    return D3DApp::MsgProc(hwnd, msg, wParam, lParam);
 }
 
 void CrateApp::OnResize()
@@ -273,6 +338,11 @@ void CrateApp::Update(const GameTimer& gt)
 
 void CrateApp::Draw(const GameTimer& gt)
 {
+    ImGui_ImplDX12_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+    DrawImGui();
+
     auto cmdListAlloc = mCurrFrameResource->CmdListAlloc;
 
     // Reuse the memory associated with command recording.
@@ -301,12 +371,28 @@ void CrateApp::Draw(const GameTimer& gt)
             DrawRenderItems(cmdList, mOpaqueRitems);
         });
 
+    // RenderingSystem leaves the swap-chain buffer in PRESENT. Draw ImGui last.
+    auto toRenderTarget = CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
+        D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    mCommandList->ResourceBarrier(1, &toRenderTarget);
+    const auto backBufferView = CurrentBackBufferView();
+    mCommandList->OMSetRenderTargets(1, &backBufferView, true, nullptr);
+
+    ID3D12DescriptorHeap* imguiHeaps[1] = { mImGuiSrvDescriptorHeap.Get() };
+    mCommandList->SetDescriptorHeaps(1, imguiHeaps);
+    ImGui::Render();
+    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), mCommandList.Get());
+
+    auto toPresent = CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
+        D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+    mCommandList->ResourceBarrier(1, &toPresent);
+
     // Done recording commands.
     ThrowIfFailed(mCommandList->Close());
 
     // Add the command list to the queue for execution.
     ID3D12CommandList* cmdsLists[] = { mCommandList.Get() };
-    mCommandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
+    mCommandQueue->ExecuteCommandLists(1, cmdsLists);
 
     // Swap the back and front buffers
     ThrowIfFailed(mSwapChain->Present(0, 0));
@@ -323,6 +409,9 @@ void CrateApp::Draw(const GameTimer& gt)
 
 void CrateApp::OnMouseDown(WPARAM btnState, int x, int y)
 {
+    if (ImGui::GetCurrentContext() != nullptr && ImGui::GetIO().WantCaptureMouse)
+        return;
+
     mLastMousePos.x = x;
     mLastMousePos.y = y;
 
@@ -331,11 +420,20 @@ void CrateApp::OnMouseDown(WPARAM btnState, int x, int y)
 
 void CrateApp::OnMouseUp(WPARAM btnState, int x, int y)
 {
+    if (ImGui::GetCurrentContext() != nullptr && ImGui::GetIO().WantCaptureMouse)
+    {
+        ReleaseCapture();
+        return;
+    }
+
     ReleaseCapture();
 }
 
 void CrateApp::OnMouseMove(WPARAM btnState, int x, int y)
 {
+    if (ImGui::GetCurrentContext() != nullptr && ImGui::GetIO().WantCaptureMouse)
+        return;
+
     if ((btnState & MK_LBUTTON) != 0)
     {
         // Make each pixel correspond to a quarter of a degree.
@@ -373,7 +471,7 @@ void CrateApp::OnKeyboardInput(const GameTimer& gt)
 void CrateApp::UpdateCamera(const GameTimer& gt)
 {
     // Convert Spherical to Cartesian coordinates.
-    XMFLOAT3 focus = { 0.0f, 60.0f, 0.0f };
+    XMFLOAT3 focus = { 0.0f, 15.0f, 0.0f };
     mEyePos.x = focus.x + mRadius * sinf(mPhi) * cosf(mTheta);
     mEyePos.z = focus.z + mRadius * sinf(mPhi) * sinf(mTheta);
     mEyePos.y = focus.y + mRadius * cosf(mPhi);
@@ -432,6 +530,13 @@ void CrateApp::UpdateMaterialCBs(const GameTimer& gt)
             matConstants.DiffuseAlbedo = mat->DiffuseAlbedo;
             matConstants.FresnelR0 = mat->FresnelR0;
             matConstants.Roughness = mat->Roughness;
+            matConstants.DisplacementScale = mat->DisplacementScale;
+            matConstants.MinTessDistance = mat->MinTessDistance;
+            matConstants.MaxTessDistance = mat->MaxTessDistance;
+            matConstants.MinTessFactor = mat->MinTessFactor;
+            matConstants.MaxTessFactor = mat->MaxTessFactor;
+            matConstants.UseNormalMap = mat->NormalTexturePath.empty() ? 0 : 1;
+            matConstants.UseDisplacementMap = mat->DisplacementTexturePath.empty() ? 0 : 1;
             XMStoreFloat4x4(&matConstants.MatTransform, XMMatrixTranspose(matTransform));
 
             currMaterialCB->CopyData(mat->MatCBIndex, matConstants);
@@ -480,7 +585,7 @@ void CrateApp::UpdateLightCB(const GameTimer& gt)
 
     XMStoreFloat4x4(&mLightCB.InvViewProj, XMMatrixTranspose(invViewProj));
     mLightCB.EyePosW = mEyePos;
-    mLightCB.AmbientStrength = 0.04f;
+    mLightCB.AmbientStrength = 0.16f;
     mLightCB.Directional = mDirectionalLight;
     mLightCB.PointLightCount = (int)std::min<size_t>(mPointLights.size(), MaxPointLights);
     mLightCB.SpotLightCount = (int)std::min<size_t>(mSpotLights.size(), MaxSpotLights);
@@ -499,9 +604,76 @@ void CrateApp::LoadTextures()
 {
 }
 
+void CrateApp::InitializeImGui()
+{
+    D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
+    heapDesc.NumDescriptors = 1;
+    heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&heapDesc,
+        IID_PPV_ARGS(mImGuiSrvDescriptorHeap.GetAddressOf())));
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    ImGui::StyleColorsDark();
+
+    ImGui_ImplDX12_InitInfo initInfo;
+    initInfo.Device = md3dDevice.Get();
+    initInfo.CommandQueue = mCommandQueue.Get();
+    initInfo.NumFramesInFlight = gNumFrameResources;
+    initInfo.RTVFormat = mBackBufferFormat;
+    initInfo.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    initInfo.SrvDescriptorHeap = mImGuiSrvDescriptorHeap.Get();
+    initInfo.LegacySingleSrvCpuDescriptor = mImGuiSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
+    initInfo.LegacySingleSrvGpuDescriptor = mImGuiSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart();
+
+    if (!ImGui_ImplDX12_Init(&initInfo) || !ImGui_ImplWin32_Init(mhMainWnd))
+        throw std::runtime_error("Failed to initialize Dear ImGui.");
+}
+
+void CrateApp::DrawImGui()
+{
+    ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(240.0f, 0.0f), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Scene Models");
+    ImGui::TextUnformatted("Show or hide imported models:");
+    ImGui::Separator();
+
+    for (LoadedModel& model : mModels)
+        ImGui::Checkbox(model.Name.c_str(), &model.Visible);
+
+    ImGui::Separator();
+    if (ImGui::SliderFloat("Walnut displacement", &mWalnutDisplacementScale,
+        0.0f, 4.0f, "%.2f"))
+    {
+        for (const LoadedModel& model : mModels)
+        {
+            if (!model.UseDetailMaps)
+                continue;
+
+            for (UINT materialIndex = 0; materialIndex < model.Scene->mNumMaterials; ++materialIndex)
+            {
+                const std::string materialName = "mat" +
+                    std::to_string(model.MaterialOffset + materialIndex);
+                Material* material = mMaterials.at(materialName).get();
+                material->DisplacementScale = mWalnutDisplacementScale;
+                material->NumFramesDirty = gNumFrameResources;
+            }
+        }
+    }
+    ImGui::TextDisabled("0 = flat, 4 = exaggerated");
+    ImGui::Separator();
+    ImGui::TextDisabled("Right mouse: zoom");
+    ImGui::TextDisabled("Left mouse: orbit");
+    ImGui::End();
+}
+
 void CrateApp::BuildDescriptorHeaps()
 {
-    UINT numDescriptors = (UINT)mMaterials.size();
+    constexpr UINT texturesPerMaterial = 3;
+    UINT numDescriptors = (UINT)mMaterials.size() * texturesPerMaterial;
     if (numDescriptors == 0)
         numDescriptors = 1;
 
@@ -523,30 +695,41 @@ void CrateApp::BuildDescriptorHeaps()
     for (auto& pair : mMaterials)
     {
         Material* mat = pair.second.get();
-        ID3D12Resource* texResource = fallbackTex.Get();
-
-        if (!mat->TexturePath.empty())
+        const std::string paths[texturesPerMaterial] =
         {
-            std::string fullPath = mModelDir + mat->TexturePath;
+            mat->TexturePath,
+            mat->NormalTexturePath,
+            mat->DisplacementTexturePath
+        };
 
-            Texture* texPtr = _textureLoader.LoadTexture(std::wstring(fullPath.begin(), fullPath.end()));
-            if (!texPtr)
-                throw std::runtime_error("Failed to load texture: " + fullPath);
-            texResource = texPtr->Resource.Get();
+        mat->DiffuseSrvHeapIndex = index;
+        mat->NormalSrvHeapIndex = index + 1;
+        mat->DisplacementSrvHeapIndex = index + 2;
+
+        for (const std::string& path : paths)
+        {
+            ID3D12Resource* texResource = fallbackTex.Get();
+            if (!path.empty())
+            {
+                std::string fullPath = mat->TextureDirectory + path;
+                Texture* texPtr = _textureLoader.LoadTexture(std::wstring(fullPath.begin(), fullPath.end()));
+                if (!texPtr)
+                    throw std::runtime_error("Failed to load texture: " + fullPath);
+                texResource = texPtr->Resource.Get();
+            }
+
+            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srvDesc.Format = texResource->GetDesc().Format;
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srvDesc.Texture2D.MostDetailedMip = 0;
+            srvDesc.Texture2D.MipLevels = texResource->GetDesc().MipLevels;
+            srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
+            md3dDevice->CreateShaderResourceView(texResource, &srvDesc, hDescriptor);
+
+            ++index;
+            hDescriptor.Offset(1, mCbvSrvDescriptorSize);
         }
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srvDesc.Format = texResource->GetDesc().Format;
-        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        srvDesc.Texture2D.MostDetailedMip = 0;
-        srvDesc.Texture2D.MipLevels = texResource->GetDesc().MipLevels;
-        srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
-
-        md3dDevice->CreateShaderResourceView(texResource, &srvDesc, hDescriptor);
-
-        mat->DiffuseSrvHeapIndex = index++;
-        hDescriptor.Offset(1, mCbvSrvDescriptorSize);
     }
 }
 
@@ -557,14 +740,15 @@ void CrateApp::BuildShadersAndInputLayout()
     {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 40, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
     };
 }
 
 void CrateApp::BuildShapeGeometry()
 {
-    if (!mScene || !mScene->mRootNode)
-        throw std::runtime_error("Scene not loaded.");
+    if (mModels.empty())
+        throw std::runtime_error("No models loaded.");
 
     std::vector<Vertex> vertices;
     std::vector<std::uint32_t> indices;
@@ -572,40 +756,56 @@ void CrateApp::BuildShapeGeometry()
     auto geo = std::make_unique<MeshGeometry>();
     geo->Name = "objGeo";
 
-    for (UINT meshIndex = 0; meshIndex < mScene->mNumMeshes; ++meshIndex)
+    for (UINT modelIndex = 0; modelIndex < (UINT)mModels.size(); ++modelIndex)
     {
-        aiMesh* mesh = mScene->mMeshes[meshIndex];
-
-        SubmeshGeometry submesh;
-        submesh.BaseVertexLocation = (UINT)vertices.size();
-        submesh.StartIndexLocation = (UINT)indices.size();
-        submesh.IndexCount = mesh->mNumFaces * 3;
-        submesh.MaterialIndex = mesh->mMaterialIndex;
-
-        for (UINT i = 0; i < mesh->mNumVertices; ++i)
+        const LoadedModel& model = mModels[modelIndex];
+        for (UINT meshIndex = 0; meshIndex < model.Scene->mNumMeshes; ++meshIndex)
         {
-            Vertex v;
+            aiMesh* mesh = model.Scene->mMeshes[meshIndex];
 
-            v.Pos = { mesh->mVertices[i].x, mesh->mVertices[i].y, mesh->mVertices[i].z };
+            SubmeshGeometry submesh;
+            submesh.BaseVertexLocation = (UINT)vertices.size();
+            submesh.StartIndexLocation = (UINT)indices.size();
+            submesh.IndexCount = mesh->mNumFaces * 3;
+            submesh.MaterialIndex = model.MaterialOffset + mesh->mMaterialIndex;
+            submesh.ModelIndex = modelIndex;
 
-            v.Normal = { mesh->mNormals[i].x, mesh->mNormals[i].y, mesh->mNormals[i].z };
+            for (UINT i = 0; i < mesh->mNumVertices; ++i)
+            {
+                Vertex v;
+                v.Pos = { mesh->mVertices[i].x, mesh->mVertices[i].y, mesh->mVertices[i].z };
+                v.Normal = { mesh->mNormals[i].x, mesh->mNormals[i].y, mesh->mNormals[i].z };
 
-            if (mesh->HasTextureCoords(0))
-                v.TexC = { mesh->mTextureCoords[0][i].x, mesh->mTextureCoords[0][i].y };
-            else
-                v.TexC = { 0.0f, 0.0f };
+                if (mesh->HasTangentsAndBitangents())
+                {
+                    XMVECTOR normal = XMLoadFloat3(&v.Normal);
+                    XMVECTOR tangent = XMVectorSet(mesh->mTangents[i].x, mesh->mTangents[i].y, mesh->mTangents[i].z, 0.0f);
+                    XMVECTOR bitangent = XMVectorSet(mesh->mBitangents[i].x, mesh->mBitangents[i].y, mesh->mBitangents[i].z, 0.0f);
+                    float handedness = XMVectorGetX(XMVector3Dot(XMVector3Cross(normal, tangent), bitangent)) < 0.0f ? -1.0f : 1.0f;
+                    v.TangentU = { mesh->mTangents[i].x, mesh->mTangents[i].y, mesh->mTangents[i].z, handedness };
+                }
+                else
+                    v.TangentU = { 1.0f, 0.0f, 0.0f, 1.0f };
 
-            vertices.push_back(v);
+                if (mesh->HasTextureCoords(0))
+                    v.TexC = { mesh->mTextureCoords[0][i].x, mesh->mTextureCoords[0][i].y };
+                else
+                    v.TexC = { 0.0f, 0.0f };
+
+                vertices.push_back(v);
+            }
+
+            for (UINT i = 0; i < mesh->mNumFaces; ++i)
+            {
+                const aiFace& face = mesh->mFaces[i];
+                for (UINT j = 0; j < face.mNumIndices; ++j)
+                    indices.push_back(face.mIndices[j]);
+            }
+
+            const std::string submeshName = "model" + std::to_string(modelIndex) +
+                "_mesh" + std::to_string(meshIndex);
+            geo->DrawArgs[submeshName] = submesh;
         }
-
-        for (UINT i = 0; i < mesh->mNumFaces; ++i)
-        {
-            const aiFace& face = mesh->mFaces[i];
-            for (UINT j = 0; j < face.mNumIndices; ++j)
-                indices.push_back(face.mIndices[j]);
-        }
-
-        geo->DrawArgs["mesh" + std::to_string(meshIndex)] = submesh;
     }
 
     const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
@@ -641,6 +841,8 @@ void CrateApp::BuildLightVolumeGeometry()
     {
         vertices[i].Pos = box.Vertices[i].Position;
         vertices[i].Normal = box.Vertices[i].Normal;
+        vertices[i].TangentU = { box.Vertices[i].TangentU.x, box.Vertices[i].TangentU.y,
+            box.Vertices[i].TangentU.z, 1.0f };
         vertices[i].TexC = box.Vertices[i].TexC;
     }
 
@@ -688,31 +890,66 @@ void CrateApp::BuildFrameResources()
 
 void CrateApp::BuildMaterials()
 {
-    if (!mScene || !mScene->mRootNode)
-        throw std::runtime_error("Scene not loaded.");
+    if (mModels.empty())
+        throw std::runtime_error("No models loaded.");
 
-    for (UINT i = 0; i < mScene->mNumMaterials; ++i)
+    for (const LoadedModel& model : mModels)
     {
-        aiMaterial* aiMat = mScene->mMaterials[i];
+        for (UINT i = 0; i < model.Scene->mNumMaterials; ++i)
+        {
+            aiMaterial* aiMat = model.Scene->mMaterials[i];
+            const UINT globalIndex = model.MaterialOffset + i;
 
-        auto mat = std::make_unique<Material>();
-        mat->Name = "mat" + std::to_string(i);
-        mat->MatCBIndex = i;
-        mat->DiffuseSrvHeapIndex = 0;
-        mat->DiffuseAlbedo = XMFLOAT4(1, 1, 1, 1);
-        mat->FresnelR0 = XMFLOAT3(0.04f, 0.04f, 0.04f);
-        mat->Roughness = 0.5f;
-        mat->MatTransform = MathHelper::Identity4x4();
+            auto mat = std::make_unique<Material>();
+            mat->Name = "mat" + std::to_string(globalIndex);
+            mat->MatCBIndex = globalIndex;
+            mat->TextureDirectory = model.Directory;
+            mat->DiffuseSrvHeapIndex = 0;
+            mat->DiffuseAlbedo = XMFLOAT4(1, 1, 1, 1);
+            mat->FresnelR0 = XMFLOAT3(0.04f, 0.04f, 0.04f);
+            mat->Roughness = 0.5f;
+            mat->MatTransform = MathHelper::Identity4x4();
 
-        aiColor3D diffuse(1.f, 1.f, 1.f);
-        if (aiMat->Get(AI_MATKEY_COLOR_DIFFUSE, diffuse) == AI_SUCCESS)
-            mat->DiffuseAlbedo = XMFLOAT4(diffuse.r, diffuse.g, diffuse.b, 1.0f);
+            aiColor3D diffuse(1.f, 1.f, 1.f);
+            if (aiMat->Get(AI_MATKEY_COLOR_DIFFUSE, diffuse) == AI_SUCCESS)
+                mat->DiffuseAlbedo = XMFLOAT4(diffuse.r, diffuse.g, diffuse.b, 1.0f);
 
-        aiString texPath;
-        if (aiMat->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS)
-            mat->TexturePath = texPath.C_Str();
+            aiString texPath;
+            if (aiMat->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS)
+                mat->TexturePath = texPath.C_Str();
 
-        mMaterials[mat->Name] = std::move(mat);
+            if (model.UseDetailMaps)
+            {
+                if (aiMat->GetTexture(aiTextureType_NORMALS, 0, &texPath) == AI_SUCCESS)
+                    mat->NormalTexturePath = texPath.C_Str();
+
+                if (aiMat->GetTexture(aiTextureType_DISPLACEMENT, 0, &texPath) == AI_SUCCESS ||
+                    aiMat->GetTexture(aiTextureType_HEIGHT, 0, &texPath) == AI_SUCCESS)
+                    mat->DisplacementTexturePath = texPath.C_Str();
+
+                // Explicit fallbacks keep the assignment maps active across Assimp MTL variants.
+                if (mat->NormalTexturePath.empty())
+                    mat->NormalTexturePath = "walnut_normal.tiff";
+                if (mat->DisplacementTexturePath.empty())
+                    mat->DisplacementTexturePath = "walnut_displacement.dds";
+
+                mat->DisplacementScale = mWalnutDisplacementScale;
+                mat->MinTessDistance = 20.0f;
+                // The camera frames both models, so retain visible detail at the initial radius.
+                mat->MaxTessDistance = 160.0f;
+                mat->MinTessFactor = 1.0f;
+                mat->MaxTessFactor = 16.0f;
+            }
+            else
+            {
+                // Sponza stays at one generated triangle per source triangle.
+                mat->DisplacementScale = 0.0f;
+                mat->MinTessFactor = 1.0f;
+                mat->MaxTessFactor = 1.0f;
+            }
+
+            mMaterials[mat->Name] = std::move(mat);
+        }
     }
 }
 
@@ -720,7 +957,7 @@ void CrateApp::BuildLights()
 {
     mDirectionalLight.Direction = { 0.35f, -1.0f, 0.2f };
     mDirectionalLight.Color = { 1.0f, 0.96f, 0.88f };
-    mDirectionalLight.Intensity = 0.5f;
+    mDirectionalLight.Intensity = 1.1f;
 
     const PointLight pointLights[] =
     {
@@ -731,7 +968,7 @@ void CrateApp::BuildLights()
         { {  50.0f, 25.0f,-100.0f }, 38.0f, { 0.95f, 0.30f, 1.0f }, 1.15f }
     };
 
-    mPointLights.assign(pointLights, pointLights + _countof(pointLights));
+    mPointLights.assign(pointLights, pointLights + 5);
 
     SpotLight spot;
     spot.Position = { 0.0f, 95.0f, 5.0f };
@@ -754,12 +991,11 @@ void CrateApp::BuildRenderItems()
         SubmeshGeometry& submesh = pair.second;
 
         auto ritem = std::make_unique<RenderItem>();
-        XMStoreFloat4x4(&ritem->World,
-            XMMatrixScaling(0.1f, 0.1f, 0.1f) *
-            XMMatrixTranslation(0.0f, 13.0f, 0.0f));
+        ritem->World = mModels.at(submesh.ModelIndex).World;
         ritem->ObjCBIndex = objIndex++;
+        ritem->ModelIndex = submesh.ModelIndex;
         ritem->Geo = geo;
-        ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+        ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST;
         ritem->IndexCount = submesh.IndexCount;
         ritem->StartIndexLocation = submesh.StartIndexLocation;
         ritem->BaseVertexLocation = submesh.BaseVertexLocation;
@@ -791,14 +1027,17 @@ void CrateApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::ve
     {
         auto ri = ritems[i];
 
+        if (!mModels.at(ri->ModelIndex).Visible)
+            continue;
+
         auto vertexBufferView = ri->Geo->VertexBufferView();
         auto indexBufferView = ri->Geo->IndexBufferView();
         cmdList->IASetVertexBuffers(0, 1, &vertexBufferView);
         cmdList->IASetIndexBuffer(&indexBufferView);
         cmdList->IASetPrimitiveTopology(ri->PrimitiveType);
 
-        CD3DX12_GPU_DESCRIPTOR_HANDLE tex(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
-        tex.Offset(ri->Mat->DiffuseSrvHeapIndex, mCbvSrvDescriptorSize);
+        D3D12_GPU_DESCRIPTOR_HANDLE tex = mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart();
+        tex.ptr += static_cast<UINT64>(ri->Mat->DiffuseSrvHeapIndex) * mCbvSrvDescriptorSize;
 
         D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = objectCB->GetGPUVirtualAddress() + ri->ObjCBIndex * objCBByteSize;
         D3D12_GPU_VIRTUAL_ADDRESS matCBAddress = matCB->GetGPUVirtualAddress() + ri->Mat->MatCBIndex * matCBByteSize;
@@ -811,7 +1050,7 @@ void CrateApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::ve
     }
 }
 
-std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> CrateApp::GetStaticSamplers()
+std::vector<CD3DX12_STATIC_SAMPLER_DESC> CrateApp::GetStaticSamplers()
 {
     // Applications usually only need a handful of samplers.  So just define them all up front
     // and keep them available as part of the root signature.  

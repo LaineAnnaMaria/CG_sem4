@@ -5,8 +5,8 @@
 
 using Microsoft::WRL::ComPtr;
 
-DxException::DxException(HRESULT hr, const std::wstring& functionName, const std::wstring& filename, int lineNumber) :
-    ErrorCode(hr),
+DxException::DxException(long errorCode, const std::wstring& functionName, const std::wstring& filename, int lineNumber) :
+	ErrorCode(errorCode),
     FunctionName(functionName),
     Filename(filename),
     LineNumber(lineNumber)
@@ -98,7 +98,7 @@ ComPtr<ID3DBlob> d3dUtil::CompileShader(
     compileFlags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
 
-    HRESULT hr = S_OK;
+    auto hr = S_OK;
 
     ComPtr<ID3DBlob> byteCode = nullptr;
     ComPtr<ID3DBlob> errors;

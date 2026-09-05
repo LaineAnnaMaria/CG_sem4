@@ -6,23 +6,25 @@ void RenderingSystem::Initialize(const BuildContext& context)
 {
     BuildRootSignatures(context.Device);
     BuildShaders();
-    BuildPSOs(context);
+    BuildPsOs(context);
 }
 
 void RenderingSystem::Render(const FrameContext& context,
     const std::function<void(ID3D12GraphicsCommandList*)>& drawGeometry) const
 {
-    auto cmdList = context.CmdList;
+    const auto cmdList = context.CmdList;
 
     cmdList->RSSetViewports(1, &context.Viewport);
     cmdList->RSSetScissorRects(1, &context.ScissorRect);
 
     GeometryPass(context, drawGeometry);
 
-    cmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+    const auto resourceBarrier = CD3DX12_RESOURCE_BARRIER::Transition(
         context.BackBuffer,
         D3D12_RESOURCE_STATE_PRESENT,
-        D3D12_RESOURCE_STATE_RENDER_TARGET));
+        D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+    cmdList->ResourceBarrier(1, &resourceBarrier);
 
     cmdList->ClearRenderTargetView(context.BackBufferView, Colors::Black, 0, nullptr);
     cmdList->OMSetRenderTargets(1, &context.BackBufferView, true, nullptr);
@@ -30,33 +32,35 @@ void RenderingSystem::Render(const FrameContext& context,
     DirectionalLightingPass(context);
     LocalLightingPass(context);
 
-    cmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+    const auto fromRtToPresent = CD3DX12_RESOURCE_BARRIER::Transition(
         context.BackBuffer,
         D3D12_RESOURCE_STATE_RENDER_TARGET,
-        D3D12_RESOURCE_STATE_PRESENT));
+        D3D12_RESOURCE_STATE_PRESENT);
+
+    cmdList->ResourceBarrier(1, &fromRtToPresent);
 }
 
 void RenderingSystem::GeometryPass(const FrameContext& context,
     const std::function<void(ID3D12GraphicsCommandList*)>& drawGeometry) const
 {
-    auto cmdList = context.CmdList;
-    auto gBuffer = context.GBufferTarget;
+    const auto cmdList = context.CmdList;
+    const auto buffer = context.GBufferTarget;
 
     cmdList->SetPipelineState(_geometryPso.Get());
-    gBuffer->ChangeRTVsState(D3D12_RESOURCE_STATE_RENDER_TARGET);
-    gBuffer->ChangeDSVState(D3D12_RESOURCE_STATE_DEPTH_WRITE);
-    gBuffer->ClearInfo(Colors::Transparent);
+    buffer->ChangeRTVsState(D3D12_RESOURCE_STATE_RENDER_TARGET);
+    buffer->ChangeDSVState(D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    buffer->ClearInfo(Colors::Transparent);
 
-    auto rtvs = gBuffer->RTVs();
-    auto dsv = gBuffer->DepthStencilView();
-    cmdList->OMSetRenderTargets((UINT)rtvs.size(), rtvs.data(), false, &dsv);
+    const auto rtvs = buffer->RTVs();
+    const auto dsv = buffer->DepthStencilView();
+    cmdList->OMSetRenderTargets(static_cast<UINT>(rtvs.size()), rtvs.data(), false, &dsv);
 
     ID3D12DescriptorHeap* descriptorHeaps[] = { context.SceneSrvHeap };
-    cmdList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
+    cmdList->SetDescriptorHeaps(1, descriptorHeaps);
     cmdList->SetGraphicsRootSignature(_geometryRootSignature.Get());
 
-    auto passCB = context.CurrFrameResource->PassCB->Resource();
-    cmdList->SetGraphicsRootConstantBufferView(2, passCB->GetGPUVirtualAddress());
+    const auto passCb = context.CurrFrameResource->PassCB->Resource();
+    cmdList->SetGraphicsRootConstantBufferView(2, passCb->GetGPUVirtualAddress());
 
     drawGeometry(cmdList);
 }
@@ -70,17 +74,20 @@ void RenderingSystem::DirectionalLightingPass(const FrameContext& context) const
     cmdList->SetGraphicsRootSignature(_lightingRootSignature.Get());
 
     ID3D12DescriptorHeap* descriptorHeaps[] = { gBuffer->SRVHeap() };
-    cmdList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
+    cmdList->SetDescriptorHeaps(1, descriptorHeaps);
 
     gBuffer->ChangeRTVsState(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     gBuffer->ChangeDSVState(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
-    CD3DX12_GPU_DESCRIPTOR_HANDLE gbufferSrv(gBuffer->SRVHeap()->GetGPUDescriptorHandleForHeapStart());
+    D3D12_GPU_DESCRIPTOR_HANDLE gbufferSrv = {};
+    gbufferSrv = gBuffer->SRVHeap()->GetGPUDescriptorHandleForHeapStart();
     cmdList->SetGraphicsRootDescriptorTable(0, gbufferSrv);
 
-    auto lightCB = context.CurrFrameResource->LightCB->Resource();
-    cmdList->SetGraphicsRootConstantBufferView(1, lightCB->GetGPUVirtualAddress());
+    const auto lightCb = context.CurrFrameResource->LightCB->Resource();
+    cmdList->SetGraphicsRootConstantBufferView(1, lightCb->GetGPUVirtualAddress());
 
+    // Geometry leaves the IA in patch-list mode; the fullscreen pass needs a triangle.
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList->DrawInstanced(3, 1, 0, 0);
 }
 
@@ -95,7 +102,11 @@ void RenderingSystem::LocalLightingPass(const FrameContext& context) const
     cmdList->SetPipelineState(_localLightingPso.Get());
     cmdList->SetGraphicsRootSignature(_lightingRootSignature.Get());
 
-    CD3DX12_GPU_DESCRIPTOR_HANDLE gbufferSrv(context.GBufferTarget->SRVHeap()->GetGPUDescriptorHandleForHeapStart());
+    ID3D12DescriptorHeap* descriptorHeaps[1] = { context.GBufferTarget->SRVHeap() };
+    cmdList->SetDescriptorHeaps(1, descriptorHeaps);
+
+    D3D12_GPU_DESCRIPTOR_HANDLE gbufferSrv = {};
+    gbufferSrv = context.GBufferTarget->SRVHeap()->GetGPUDescriptorHandleForHeapStart();
     cmdList->SetGraphicsRootDescriptorTable(0, gbufferSrv);
 
     auto lightCB = context.CurrFrameResource->LightCB->Resource();
@@ -118,26 +129,28 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
 {
     {
         CD3DX12_DESCRIPTOR_RANGE texTable;
-        texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+        // Every material owns three contiguous descriptors: diffuse, normal, displacement.
+        texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0);
 
         CD3DX12_ROOT_PARAMETER slotRootParameter[4];
-        slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);
+        // The domain shader samples displacement, while the pixel shader samples color/normal.
+        slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_ALL);
         slotRootParameter[1].InitAsConstantBufferView(0);
         slotRootParameter[2].InitAsConstantBufferView(1);
         slotRootParameter[3].InitAsConstantBufferView(2);
 
-        auto staticSamplers = GetStaticSamplers();
+        const auto staticSamplers = GetStaticSamplers();
         CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(4, slotRootParameter,
-            (UINT)staticSamplers.size(), staticSamplers.data(),
+            static_cast<UINT>(staticSamplers.size()), staticSamplers.data(),
             D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
         Microsoft::WRL::ComPtr<ID3DBlob> serializedRootSig = nullptr;
         Microsoft::WRL::ComPtr<ID3DBlob> errorBlob = nullptr;
-        HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+        const auto hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
             serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
 
         if (errorBlob != nullptr)
-            ::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+            ::OutputDebugStringA(static_cast<char*>(errorBlob->GetBufferPointer()));
         ThrowIfFailed(hr);
 
         ThrowIfFailed(device->CreateRootSignature(
@@ -162,11 +175,11 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
 
         Microsoft::WRL::ComPtr<ID3DBlob> serializedRootSig = nullptr;
         Microsoft::WRL::ComPtr<ID3DBlob> errorBlob = nullptr;
-        HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+        const auto hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
             serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
 
         if (errorBlob != nullptr)
-            ::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+            ::OutputDebugStringA(static_cast<char*>(errorBlob->GetBufferPointer()));
         ThrowIfFailed(hr);
 
         ThrowIfFailed(device->CreateRootSignature(
@@ -180,6 +193,8 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
 void RenderingSystem::BuildShaders()
 {
     _shaders["geometryVS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "VS", "vs_5_0");
+    _shaders["geometryHS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "HS", "hs_5_0");
+    _shaders["geometryDS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "DS", "ds_5_0");
     _shaders["geometryPS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "PS", "ps_5_0");
     _shaders["directionalVS"] = d3dUtil::CompileShader(L"Shaders\\DirLight.hlsl", nullptr, "VS", "vs_5_0");
     _shaders["directionalPS"] = d3dUtil::CompileShader(L"Shaders\\DirLight.hlsl", nullptr, "PS", "ps_5_0");
@@ -187,26 +202,36 @@ void RenderingSystem::BuildShaders()
     _shaders["localLightingPS"] = d3dUtil::CompileShader(L"Shaders\\DirLight.hlsl", nullptr, "LocalLightingPS", "ps_5_0");
 }
 
-void RenderingSystem::BuildPSOs(const BuildContext& context)
+void RenderingSystem::BuildPsOs(const BuildContext& context)
 {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC geometryPsoDesc = {};
-    geometryPsoDesc.InputLayout = { context.GeometryInputLayout->data(), (UINT)context.GeometryInputLayout->size() };
+    geometryPsoDesc.InputLayout = { context.GeometryInputLayout->data(), static_cast<UINT>(context.GeometryInputLayout->size()) };
     geometryPsoDesc.pRootSignature = _geometryRootSignature.Get();
     geometryPsoDesc.VS =
     {
-        reinterpret_cast<BYTE*>(_shaders["geometryVS"]->GetBufferPointer()),
+        static_cast<BYTE*>(_shaders["geometryVS"]->GetBufferPointer()),
         _shaders["geometryVS"]->GetBufferSize()
+    };
+    geometryPsoDesc.HS =
+    {
+        static_cast<BYTE*>(_shaders["geometryHS"]->GetBufferPointer()),
+        _shaders["geometryHS"]->GetBufferSize()
+    };
+    geometryPsoDesc.DS =
+    {
+        static_cast<BYTE*>(_shaders["geometryDS"]->GetBufferPointer()),
+        _shaders["geometryDS"]->GetBufferSize()
     };
     geometryPsoDesc.PS =
     {
-        reinterpret_cast<BYTE*>(_shaders["geometryPS"]->GetBufferPointer()),
+        static_cast<BYTE*>(_shaders["geometryPS"]->GetBufferPointer()),
         _shaders["geometryPS"]->GetBufferSize()
     };
     geometryPsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
     geometryPsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
     geometryPsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     geometryPsoDesc.SampleMask = UINT_MAX;
-    geometryPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    geometryPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
     geometryPsoDesc.NumRenderTargets = GBuffer::InfoCount();
     for (int i = 0; i < GBuffer::InfoCount(); i++)
         geometryPsoDesc.RTVFormats[i] = GBuffer::infoFormats[i];
@@ -218,19 +243,22 @@ void RenderingSystem::BuildPSOs(const BuildContext& context)
     D3D12_GRAPHICS_PIPELINE_STATE_DESC directionalPsoDesc = geometryPsoDesc;
     directionalPsoDesc.InputLayout = {};
     directionalPsoDesc.pRootSignature = _lightingRootSignature.Get();
+    directionalPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    directionalPsoDesc.HS = {};
+    directionalPsoDesc.DS = {};
     directionalPsoDesc.VS =
     {
-        reinterpret_cast<BYTE*>(_shaders["directionalVS"]->GetBufferPointer()),
+        static_cast<BYTE*>(_shaders["directionalVS"]->GetBufferPointer()),
         _shaders["directionalVS"]->GetBufferSize()
     };
     directionalPsoDesc.PS =
     {
-        reinterpret_cast<BYTE*>(_shaders["directionalPS"]->GetBufferPointer()),
+        static_cast<BYTE*>(_shaders["directionalPS"]->GetBufferPointer()),
         _shaders["directionalPS"]->GetBufferSize()
     };
     directionalPsoDesc.NumRenderTargets = 1;
-    for (int i = 0; i < 8; ++i)
-        directionalPsoDesc.RTVFormats[i] = DXGI_FORMAT_UNKNOWN;
+    for (auto& rtvFormat : directionalPsoDesc.RTVFormats)
+        rtvFormat = DXGI_FORMAT_UNKNOWN;
     directionalPsoDesc.RTVFormats[0] = context.BackBufferFormat;
     directionalPsoDesc.DepthStencilState.DepthEnable = false;
     directionalPsoDesc.DepthStencilState.StencilEnable = false;
@@ -242,15 +270,15 @@ void RenderingSystem::BuildPSOs(const BuildContext& context)
     };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC localPsoDesc = directionalPsoDesc;
-    localPsoDesc.InputLayout = { localLightInputLayout.data(), (UINT)localLightInputLayout.size() };
+    localPsoDesc.InputLayout = { localLightInputLayout.data(), static_cast<UINT>(localLightInputLayout.size()) };
     localPsoDesc.VS =
     {
-        reinterpret_cast<BYTE*>(_shaders["localLightingVS"]->GetBufferPointer()),
+        static_cast<BYTE*>(_shaders["localLightingVS"]->GetBufferPointer()),
         _shaders["localLightingVS"]->GetBufferSize()
     };
     localPsoDesc.PS =
     {
-        reinterpret_cast<BYTE*>(_shaders["localLightingPS"]->GetBufferPointer()),
+        static_cast<BYTE*>(_shaders["localLightingPS"]->GetBufferPointer()),
         _shaders["localLightingPS"]->GetBufferSize()
     };
     localPsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
@@ -261,11 +289,12 @@ void RenderingSystem::BuildPSOs(const BuildContext& context)
     localPsoDesc.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
     localPsoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
     localPsoDesc.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-    localPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    // Render one back-facing shell, whether the camera is inside or outside.
+    localPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_FRONT;
     ThrowIfFailed(context.Device->CreateGraphicsPipelineState(&localPsoDesc, IID_PPV_ARGS(&_localLightingPso)));
 }
 
-std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> RenderingSystem::GetStaticSamplers() const
+std::vector<CD3DX12_STATIC_SAMPLER_DESC> RenderingSystem::GetStaticSamplers()
 {
     const CD3DX12_STATIC_SAMPLER_DESC pointWrap(
         0, D3D12_FILTER_MIN_MAG_MIP_POINT,

@@ -130,8 +130,8 @@ float4 PS(VertexOut pin) : SV_Target
 LocalVertexOut LocalLightingVS(LocalVertexIn vin, uint instanceId : SV_InstanceID)
 {
     LocalVertexOut vout;
-    vout.LightType = instanceId < gPointLightCount ? 0 : 1;
-    vout.LightIndex = vout.LightType == 0 ? instanceId : instanceId - gPointLightCount;
+    vout.LightType = instanceId < (uint)gPointLightCount ? 0 : 1;
+    vout.LightIndex = vout.LightType == 0 ? (int)instanceId : (int)instanceId - gPointLightCount;
 
     float3 position;
     float radius;

@@ -75,6 +75,8 @@ struct Vertex
 {
     DirectX::XMFLOAT3 Pos;
     DirectX::XMFLOAT3 Normal;
+    // xyz is the tangent; w preserves the tangent-space handedness.
+    DirectX::XMFLOAT4 TangentU;
 	DirectX::XMFLOAT2 TexC;
 };
 

@@ -221,7 +221,7 @@ void D3DApp::OnResize()
     // Execute the resize commands.
     ThrowIfFailed(mCommandList->Close());
     ID3D12CommandList* cmdsLists[] = { mCommandList.Get() };
-    mCommandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
+    mCommandQueue->ExecuteCommandLists(1, cmdsLists);
 
 	// Wait until resize is complete.
 	FlushCommandQueue();
@@ -428,7 +428,7 @@ bool D3DApp::InitDirect3D()
 	ThrowIfFailed(CreateDXGIFactory1(IID_PPV_ARGS(&mdxgiFactory)));
 
 	// Try to create hardware device.
-	HRESULT hardwareResult = D3D12CreateDevice(
+	auto hardwareResult = D3D12CreateDevice(
 		nullptr,             // default adapter
 		D3D_FEATURE_LEVEL_11_0,
 		IID_PPV_ARGS(&md3dDevice));
