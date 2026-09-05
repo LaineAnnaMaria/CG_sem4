@@ -174,7 +174,8 @@ void GBuffer::ChangeRTVsState(D3D12_RESOURCE_STATES stateAfter)
 		barriers.push_back(CD3DX12_RESOURCE_BARRIER::Transition(_info[i].Resource.Get(), _info[i].prevState, stateAfter));
 		_info[i].prevState = stateAfter;
 	}
-	_cmdList->ResourceBarrier((UINT)barriers.size(), barriers.data());
+	if (!barriers.empty())
+		_cmdList->ResourceBarrier((UINT)barriers.size(), barriers.data());
 }
 
 void GBuffer::ChangeDSVState(D3D12_RESOURCE_STATES stateAfter)

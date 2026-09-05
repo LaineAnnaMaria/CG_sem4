@@ -4,9 +4,46 @@
 #include "Common/MathHelper.h"
 #include "Common/UploadBuffer.h"
 
-struct DirLightConstants {
-    DirectX::XMFLOAT3 direction = { 1.f, 1.f, 1.f };
-    float pad = 0;
+constexpr int MaxPointLights = 8;
+constexpr int MaxSpotLights = 4;
+
+struct DirectionalLight
+{
+    DirectX::XMFLOAT3 Direction = { 0.35f, -1.0f, 0.25f };
+    float Intensity = 0.75f;
+    DirectX::XMFLOAT3 Color = { 1.0f, 0.96f, 0.88f };
+    float Pad0 = 0.0f;
+};
+
+struct PointLight
+{
+    DirectX::XMFLOAT3 Position = { 0.0f, 0.0f, 0.0f };
+    float Radius = 10.0f;
+    DirectX::XMFLOAT3 Color = { 1.0f, 1.0f, 1.0f };
+    float Intensity = 1.0f;
+};
+
+struct SpotLight
+{
+    DirectX::XMFLOAT3 Position = { 0.0f, 0.0f, 0.0f };
+    float Radius = 18.0f;
+    DirectX::XMFLOAT3 Direction = { 0.0f, -1.0f, 0.0f };
+    float SpotPower = 24.0f;
+    DirectX::XMFLOAT3 Color = { 1.0f, 1.0f, 1.0f };
+    float Intensity = 1.0f;
+};
+
+struct LightConstants
+{
+    DirectX::XMFLOAT4X4 InvViewProj = MathHelper::Identity4x4();
+    DirectX::XMFLOAT3 EyePosW = { 0.0f, 0.0f, 0.0f };
+    float AmbientStrength = 0.08f;
+    DirectionalLight Directional;
+    int PointLightCount = 0;
+    int SpotLightCount = 0;
+    DirectX::XMFLOAT2 Pad0 = { 0.0f, 0.0f };
+    PointLight PointLights[MaxPointLights];
+    SpotLight SpotLights[MaxSpotLights];
 };
 
 struct ObjectConstants
@@ -62,7 +99,7 @@ public:
     std::unique_ptr<UploadBuffer<PassConstants>> PassCB = nullptr;
     std::unique_ptr<UploadBuffer<MaterialConstants>> MaterialCB = nullptr;
     std::unique_ptr<UploadBuffer<ObjectConstants>> ObjectCB = nullptr;
-    std::unique_ptr<UploadBuffer<DirLightConstants>> DirLightCB = nullptr;
+    std::unique_ptr<UploadBuffer<LightConstants>> LightCB = nullptr;
 
     // Fence value to mark commands up to this fence point.  This lets us
     // check if these frame resources are still in use by the GPU.

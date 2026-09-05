@@ -7,6 +7,7 @@
 #include "common/UploadBuffer.h"
 #include "Common/GeometryGenerator.h"
 #include "FrameResource.h"
+#include "RenderingSystem.h"
 #include "TextureUploader.h"
 #include <filesystem>
 
@@ -83,18 +84,18 @@ private:
     void UpdateObjectCBs(const GameTimer& gt);
     void UpdateMaterialCBs(const GameTimer& gt);
     void UpdateMainPassCB(const GameTimer& gt);
+    void UpdateLightCB(const GameTimer& gt);
 
     void LoadTextures();
-    void BuildRootSignature();
     void BuildDescriptorHeaps();
     void BuildShadersAndInputLayout();
     void BuildShapeGeometry();
-    void BuildPSOs();
+    void BuildLightVolumeGeometry();
     void BuildFrameResources();
     void BuildMaterials();
+    void BuildLights();
     void BuildRenderItems();
     void DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems);
-    void DrawDirLight();
 
     std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> GetStaticSamplers();
 
@@ -106,21 +107,12 @@ private:
 
     UINT mCbvSrvDescriptorSize = 0;
 
-    ComPtr<ID3D12RootSignature> mRootSignature = nullptr;
-    ComPtr<ID3D12RootSignature> _dirLightRootSignature = nullptr;
-
-
     ComPtr<ID3D12DescriptorHeap> mSrvDescriptorHeap = nullptr;
 
     std::unordered_map<std::string, std::unique_ptr<MeshGeometry>> mGeometries;
     std::unordered_map<std::string, std::unique_ptr<Material>> mMaterials;
-    std::unordered_map<std::string, ComPtr<ID3DBlob>> mShaders;
 
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
-
-    ComPtr<ID3D12PipelineState> mOpaquePSO = nullptr;
-    ComPtr<ID3D12PipelineState> _dirLightPSO = nullptr;
-
 
     // List of all the render items.
     std::vector<std::unique_ptr<RenderItem>> mAllRitems;
@@ -129,6 +121,10 @@ private:
     std::vector<RenderItem*> mOpaqueRitems;
 
     PassConstants mMainPassCB;
+    LightConstants mLightCB;
+    DirectionalLight mDirectionalLight;
+    std::vector<PointLight> mPointLights;
+    std::vector<SpotLight> mSpotLights;
 
     XMFLOAT3 mEyePos = { 0.0f, 0.0f, 0.0f };
     XMFLOAT4X4 mView = MathHelper::Identity4x4();
@@ -136,10 +132,11 @@ private:
 
     float mTheta = 1.3f * XM_PI;
     float mPhi = 0.4f * XM_PI;
-    float mRadius = 2.5f;
+    float mRadius = 85.0f;
 
     POINT mLastMousePos;
     TextureUploader _textureLoader;
+    std::unique_ptr<RenderingSystem> mRenderingSystem;
 
 };
 
@@ -192,6 +189,7 @@ bool CrateApp::Initialize()
 
     mModelDir = "sponza/";
     _textureLoader = TextureUploader(md3dDevice.Get(), mCommandList.Get());
+    mRenderingSystem = std::make_unique<RenderingSystem>();
 
     mScene = mImporter.ReadFile(
         "sponza/sponza.obj",
@@ -209,14 +207,23 @@ bool CrateApp::Initialize()
         throw std::runtime_error(mImporter.GetErrorString());
 
     }
-    BuildRootSignature();
     BuildShadersAndInputLayout();
     BuildShapeGeometry();
+    BuildLightVolumeGeometry();
     BuildMaterials();
+    BuildLights();
     BuildDescriptorHeaps();
     BuildRenderItems();
     BuildFrameResources();
-    BuildPSOs();
+
+    RenderingSystem::BuildContext renderBuildContext;
+    renderBuildContext.Device = md3dDevice.Get();
+    renderBuildContext.GeometryInputLayout = &mInputLayout;
+    renderBuildContext.BackBufferFormat = mBackBufferFormat;
+    renderBuildContext.DepthStencilFormat = mDepthStencilFormat;
+    renderBuildContext.MsaaEnabled = m4xMsaaState;
+    renderBuildContext.MsaaQuality = m4xMsaaQuality;
+    mRenderingSystem->Initialize(renderBuildContext);
 
     // Execute the initialization commands.
     ThrowIfFailed(mCommandList->Close());
@@ -261,6 +268,7 @@ void CrateApp::Update(const GameTimer& gt)
     UpdateObjectCBs(gt);
     UpdateMaterialCBs(gt);
     UpdateMainPassCB(gt);
+    UpdateLightCB(gt);
 }
 
 void CrateApp::Draw(const GameTimer& gt)
@@ -273,43 +281,25 @@ void CrateApp::Draw(const GameTimer& gt)
 
     // A command list can be reset after it has been added to the command queue via ExecuteCommandList.
     // Reusing the command list reuses memory.
-    ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), mOpaquePSO.Get()));
+    ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), mRenderingSystem->GeometryPso()));
 
-    mCommandList->RSSetViewports(1, &mScreenViewport);
-    mCommandList->RSSetScissorRects(1, &mScissorRect);
+    RenderingSystem::FrameContext renderContext;
+    renderContext.CmdList = mCommandList.Get();
+    renderContext.GBufferTarget = _gBuffer.get();
+    renderContext.Viewport = mScreenViewport;
+    renderContext.ScissorRect = mScissorRect;
+    renderContext.BackBuffer = CurrentBackBuffer();
+    renderContext.BackBufferView = CurrentBackBufferView();
+    renderContext.SceneSrvHeap = mSrvDescriptorHeap.Get();
+    renderContext.CurrFrameResource = mCurrFrameResource;
+    renderContext.LocalLightVolumeGeo = mGeometries["lightVolumeGeo"].get();
+    renderContext.LocalLightVolumeCount = (UINT)(mPointLights.size() + mSpotLights.size());
 
-    _gBuffer->ChangeRTVsState(D3D12_RESOURCE_STATE_RENDER_TARGET);
-    _gBuffer->ChangeDSVState(D3D12_RESOURCE_STATE_DEPTH_WRITE);
-    _gBuffer->ClearInfo(Colors::Transparent);
-
-    mCommandList->OMSetRenderTargets(_gBuffer->InfoCount(), _gBuffer->RTVs().data(), false, &_gBuffer->DepthStencilView());
-
-    ID3D12DescriptorHeap* descriptorHeaps[] = { mSrvDescriptorHeap.Get() };
-    mCommandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
-
-    mCommandList->SetGraphicsRootSignature(mRootSignature.Get());
-
-    auto passCB = mCurrFrameResource->PassCB->Resource();
-    mCommandList->SetGraphicsRootConstantBufferView(2, passCB->GetGPUVirtualAddress());
-
-    DrawRenderItems(mCommandList.Get(), mOpaqueRitems);
-
-    // Indicate a state transition on the resource usage.
-    mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
-        D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET));
-
-    // Clear the back buffer and depth buffer.
-    mCommandList->ClearRenderTargetView(CurrentBackBufferView(), Colors::LightSteelBlue, 0, nullptr);
-    mCommandList->ClearDepthStencilView(DepthStencilView(), D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
-
-    // Specify the buffers we are going to render to.
-    mCommandList->OMSetRenderTargets(1, &CurrentBackBufferView(), true, nullptr);
-
-    DrawDirLight();
-
-    // Indicate a state transition on the resource usage.
-    mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
-        D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT));
+    mRenderingSystem->Render(renderContext,
+        [this](ID3D12GraphicsCommandList* cmdList)
+        {
+            DrawRenderItems(cmdList, mOpaqueRitems);
+        });
 
     // Done recording commands.
     ThrowIfFailed(mCommandList->Close());
@@ -369,7 +359,7 @@ void CrateApp::OnMouseMove(WPARAM btnState, int x, int y)
         mRadius += dx - dy;
 
         // Restrict the radius.
-        mRadius = MathHelper::Clamp(mRadius, 5.0f, 150.0f);
+        mRadius = MathHelper::Clamp(mRadius, 20.0f, 350.0f);
     }
 
     mLastMousePos.x = x;
@@ -383,13 +373,14 @@ void CrateApp::OnKeyboardInput(const GameTimer& gt)
 void CrateApp::UpdateCamera(const GameTimer& gt)
 {
     // Convert Spherical to Cartesian coordinates.
-    mEyePos.x = mRadius * sinf(mPhi) * cosf(mTheta);
-    mEyePos.z = mRadius * sinf(mPhi) * sinf(mTheta);
-    mEyePos.y = mRadius * cosf(mPhi);
+    XMFLOAT3 focus = { 0.0f, 60.0f, 0.0f };
+    mEyePos.x = focus.x + mRadius * sinf(mPhi) * cosf(mTheta);
+    mEyePos.z = focus.z + mRadius * sinf(mPhi) * sinf(mTheta);
+    mEyePos.y = focus.y + mRadius * cosf(mPhi);
 
     // Build the view matrix.
     XMVECTOR pos = XMVectorSet(mEyePos.x, mEyePos.y, mEyePos.z, 1.0f);
-    XMVECTOR target = XMVectorZero();
+    XMVECTOR target = XMLoadFloat3(&focus);
     XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
 
     XMMATRIX view = XMMatrixLookAtLH(pos, target, up);
@@ -478,99 +469,34 @@ void CrateApp::UpdateMainPassCB(const GameTimer& gt)
     auto currPassCB = mCurrFrameResource->PassCB.get();
     currPassCB->CopyData(0, mMainPassCB);
 
-    auto currDirLightCB = mCurrFrameResource->DirLightCB.get();
+}
 
-    DirLightConstants dirLightConstants;
-    dirLightConstants.direction = { 1.f, 1.f, 1.f };
+void CrateApp::UpdateLightCB(const GameTimer& gt)
+{
+    XMMATRIX view = XMLoadFloat4x4(&mView);
+    XMMATRIX proj = XMLoadFloat4x4(&mProj);
+    XMMATRIX viewProj = XMMatrixMultiply(view, proj);
+    XMMATRIX invViewProj = XMMatrixInverse(&XMMatrixDeterminant(viewProj), viewProj);
 
+    XMStoreFloat4x4(&mLightCB.InvViewProj, XMMatrixTranspose(invViewProj));
+    mLightCB.EyePosW = mEyePos;
+    mLightCB.AmbientStrength = 0.04f;
+    mLightCB.Directional = mDirectionalLight;
+    mLightCB.PointLightCount = (int)std::min<size_t>(mPointLights.size(), MaxPointLights);
+    mLightCB.SpotLightCount = (int)std::min<size_t>(mSpotLights.size(), MaxSpotLights);
 
-    currDirLightCB->CopyData(0, dirLightConstants);
+    for (int i = 0; i < mLightCB.PointLightCount; ++i)
+        mLightCB.PointLights[i] = mPointLights[i];
 
+    for (int i = 0; i < mLightCB.SpotLightCount; ++i)
+        mLightCB.SpotLights[i] = mSpotLights[i];
+
+    auto currLightCB = mCurrFrameResource->LightCB.get();
+    currLightCB->CopyData(0, mLightCB);
 }
 
 void CrateApp::LoadTextures()
 {
-}
-
-void CrateApp::BuildRootSignature()
-{
-    {
-        CD3DX12_DESCRIPTOR_RANGE texTable;
-        texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
-
-        // Root parameter can be a table, root descriptor or root constants.
-        CD3DX12_ROOT_PARAMETER slotRootParameter[4];
-
-        // Perfomance TIP: Order from most frequent to least frequent.
-        slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);
-        slotRootParameter[1].InitAsConstantBufferView(0);
-        slotRootParameter[2].InitAsConstantBufferView(1);
-        slotRootParameter[3].InitAsConstantBufferView(2);
-
-        auto staticSamplers = GetStaticSamplers();
-
-        // A root signature is an array of root parameters.
-        CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(4, slotRootParameter,
-            (UINT)staticSamplers.size(), staticSamplers.data(),
-            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
-
-        // create a root signature with a single slot which points to a descriptor range consisting of a single constant buffer
-        ComPtr<ID3DBlob> serializedRootSig = nullptr;
-        ComPtr<ID3DBlob> errorBlob = nullptr;
-        HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
-            serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
-
-        if (errorBlob != nullptr)
-        {
-            ::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
-        }
-        ThrowIfFailed(hr);
-
-        ThrowIfFailed(md3dDevice->CreateRootSignature(
-            0,
-            serializedRootSig->GetBufferPointer(),
-            serializedRootSig->GetBufferSize(),
-            IID_PPV_ARGS(mRootSignature.GetAddressOf())));
-    }
-
-    {
-        // root signature for dir light
-
-        CD3DX12_DESCRIPTOR_RANGE texTable[3];
-        texTable[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
-        texTable[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
-        texTable[2].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2);
-
-        // Root parameter can be a table, root descriptor or root constants.
-        CD3DX12_ROOT_PARAMETER slotRootParameter[2];
-
-        // Perfomance TIP: Order from most frequent to least frequent.
-        slotRootParameter[0].InitAsDescriptorTable(3, texTable, D3D12_SHADER_VISIBILITY_PIXEL);
-        slotRootParameter[1].InitAsConstantBufferView(0);
-
-        // A root signature is an array of root parameters.
-        CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(2, slotRootParameter,
-            0, nullptr,
-            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
-
-        // create a root signature with a single slot which points to a descriptor range consisting of a single constant buffer
-        ComPtr<ID3DBlob> serializedRootSig = nullptr;
-        ComPtr<ID3DBlob> errorBlob = nullptr;
-        HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
-            serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
-
-        if (errorBlob != nullptr)
-        {
-            ::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
-        }
-        ThrowIfFailed(hr);
-
-        ThrowIfFailed(md3dDevice->CreateRootSignature(
-            0,
-            serializedRootSig->GetBufferPointer(),
-            serializedRootSig->GetBufferSize(),
-            IID_PPV_ARGS(_dirLightRootSignature.GetAddressOf())));
-    }
 }
 
 void CrateApp::BuildDescriptorHeaps()
@@ -627,12 +553,6 @@ void CrateApp::BuildDescriptorHeaps()
 
 void CrateApp::BuildShadersAndInputLayout()
 {
-    mShaders["standardVS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "VS", "vs_5_0");
-    mShaders["opaquePS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "PS", "ps_5_0");
-
-    mShaders["dirLightVS"] = d3dUtil::CompileShader(L"Shaders\\DirLight.hlsl", nullptr, "VS", "vs_5_0");
-    mShaders["dirLightPS"] = d3dUtil::CompileShader(L"Shaders\\DirLight.hlsl", nullptr, "PS", "ps_5_0");
-
     mInputLayout =
     {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
@@ -670,7 +590,10 @@ void CrateApp::BuildShapeGeometry()
 
             v.Normal = { mesh->mNormals[i].x, mesh->mNormals[i].y, mesh->mNormals[i].z };
 
-            v.TexC = { mesh->mTextureCoords[0][i].x, mesh->mTextureCoords[0][i].y };
+            if (mesh->HasTextureCoords(0))
+                v.TexC = { mesh->mTextureCoords[0][i].x, mesh->mTextureCoords[0][i].y };
+            else
+                v.TexC = { 0.0f, 0.0f };
 
             vertices.push_back(v);
         }
@@ -708,65 +631,50 @@ void CrateApp::BuildShapeGeometry()
     mGeometries[geo->Name] = std::move(geo);
 }
 
-void CrateApp::BuildPSOs()
+void CrateApp::BuildLightVolumeGeometry()
 {
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC opaquePsoDesc;
+    GeometryGenerator geoGen;
+    GeometryGenerator::MeshData box = geoGen.CreateBox(2.0f, 2.0f, 2.0f, 0);
 
-    //
-    // PSO for opaque objects.
-    //
-    ZeroMemory(&opaquePsoDesc, sizeof(D3D12_GRAPHICS_PIPELINE_STATE_DESC));
-    opaquePsoDesc.InputLayout = { mInputLayout.data(), (UINT)mInputLayout.size() };
-    opaquePsoDesc.pRootSignature = mRootSignature.Get();
-    opaquePsoDesc.VS =
+    std::vector<Vertex> vertices(box.Vertices.size());
+    for (size_t i = 0; i < box.Vertices.size(); ++i)
     {
-        reinterpret_cast<BYTE*>(mShaders["standardVS"]->GetBufferPointer()),
-        mShaders["standardVS"]->GetBufferSize()
-    };
-    opaquePsoDesc.PS =
-    {
-        reinterpret_cast<BYTE*>(mShaders["opaquePS"]->GetBufferPointer()),
-        mShaders["opaquePS"]->GetBufferSize()
-    };
-    opaquePsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-    opaquePsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-    opaquePsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-    opaquePsoDesc.SampleMask = UINT_MAX;
-    opaquePsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    opaquePsoDesc.NumRenderTargets = GBuffer::InfoCount();
-    for (int i = 0; i < GBuffer::InfoCount(); i++) {
-        opaquePsoDesc.RTVFormats[i] = GBuffer::infoFormats[i];
+        vertices[i].Pos = box.Vertices[i].Position;
+        vertices[i].Normal = box.Vertices[i].Normal;
+        vertices[i].TexC = box.Vertices[i].TexC;
     }
-    opaquePsoDesc.SampleDesc.Count = m4xMsaaState ? 4 : 1;
-    opaquePsoDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
-    opaquePsoDesc.DSVFormat = mDepthStencilFormat;
-    ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&opaquePsoDesc, IID_PPV_ARGS(&mOpaquePSO)));
 
-    //dir light pso
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC dirLightPsoDesc = opaquePsoDesc;
-    dirLightPsoDesc.InputLayout = {};
-    dirLightPsoDesc.pRootSignature = _dirLightRootSignature.Get();
-    dirLightPsoDesc.VS =
-    {
-        reinterpret_cast<BYTE*>(mShaders["dirLightVS"]->GetBufferPointer()),
-        mShaders["dirLightVS"]->GetBufferSize()
-    };
-    dirLightPsoDesc.PS =
-    {
-        reinterpret_cast<BYTE*>(mShaders["dirLightPS"]->GetBufferPointer()),
-        mShaders["dirLightPS"]->GetBufferSize()
-    };
-    dirLightPsoDesc.NumRenderTargets = 1;
-    for (int i = 0; i < GBuffer::InfoCount(); i++)
-    {
-        dirLightPsoDesc.RTVFormats[i] = DXGI_FORMAT_UNKNOWN;
-    }
-    dirLightPsoDesc.RTVFormats[0] = mBackBufferFormat;
+    const auto& indices = box.Indices32;
+    const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
+    const UINT ibByteSize = (UINT)indices.size() * sizeof(std::uint32_t);
 
-    dirLightPsoDesc.DepthStencilState.DepthEnable = false;
-    dirLightPsoDesc.DepthStencilState.StencilEnable = false;
+    auto geo = std::make_unique<MeshGeometry>();
+    geo->Name = "lightVolumeGeo";
 
-    ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&dirLightPsoDesc, IID_PPV_ARGS(&_dirLightPSO)));
+    ThrowIfFailed(D3DCreateBlob(vbByteSize, &geo->VertexBufferCPU));
+    CopyMemory(geo->VertexBufferCPU->GetBufferPointer(), vertices.data(), vbByteSize);
+
+    ThrowIfFailed(D3DCreateBlob(ibByteSize, &geo->IndexBufferCPU));
+    CopyMemory(geo->IndexBufferCPU->GetBufferPointer(), indices.data(), ibByteSize);
+
+    geo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(), mCommandList.Get(),
+        vertices.data(), vbByteSize, geo->VertexBufferUploader);
+
+    geo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(), mCommandList.Get(),
+        indices.data(), ibByteSize, geo->IndexBufferUploader);
+
+    geo->VertexByteStride = sizeof(Vertex);
+    geo->VertexBufferByteSize = vbByteSize;
+    geo->IndexFormat = DXGI_FORMAT_R32_UINT;
+    geo->IndexBufferByteSize = ibByteSize;
+
+    SubmeshGeometry submesh;
+    submesh.IndexCount = (UINT)indices.size();
+    submesh.StartIndexLocation = 0;
+    submesh.BaseVertexLocation = 0;
+
+    geo->DrawArgs["box"] = submesh;
+    mGeometries[geo->Name] = std::move(geo);
 }
 
 void CrateApp::BuildFrameResources()
@@ -808,6 +716,34 @@ void CrateApp::BuildMaterials()
     }
 }
 
+void CrateApp::BuildLights()
+{
+    mDirectionalLight.Direction = { 0.35f, -1.0f, 0.2f };
+    mDirectionalLight.Color = { 1.0f, 0.96f, 0.88f };
+    mDirectionalLight.Intensity = 0.5f;
+
+    const PointLight pointLights[] =
+    {
+        { { -80.0f, 30.0f, -40.0f }, 48.0f, { 1.0f, 0.35f, 0.18f }, 1.35f },
+        { {   0.0f, 40.0f,  60.0f }, 55.0f, { 0.20f, 0.55f, 1.0f }, 1.45f },
+        { {  80.0f, 30.0f, -20.0f }, 48.0f, { 0.35f, 1.0f, 0.55f }, 1.25f },
+        { { -30.0f, 60.0f, 110.0f }, 42.0f, { 1.0f, 0.85f, 0.30f }, 1.25f },
+        { {  50.0f, 25.0f,-100.0f }, 38.0f, { 0.95f, 0.30f, 1.0f }, 1.15f }
+    };
+
+    mPointLights.assign(pointLights, pointLights + _countof(pointLights));
+
+    SpotLight spot;
+    spot.Position = { 0.0f, 95.0f, 5.0f };
+    spot.Direction = { 0.15f, -1.0f, 0.35f };
+    spot.Radius = 120.0f;
+    spot.SpotPower = 18.0f;
+    spot.Color = { 1.0f, 0.86f, 0.55f };
+    spot.Intensity = 5.0f;
+    mSpotLights.push_back(spot);
+
+}
+
 void CrateApp::BuildRenderItems()
 {
     auto geo = mGeometries["objGeo"].get();
@@ -818,6 +754,9 @@ void CrateApp::BuildRenderItems()
         SubmeshGeometry& submesh = pair.second;
 
         auto ritem = std::make_unique<RenderItem>();
+        XMStoreFloat4x4(&ritem->World,
+            XMMatrixScaling(0.1f, 0.1f, 0.1f) *
+            XMMatrixTranslation(0.0f, 13.0f, 0.0f));
         ritem->ObjCBIndex = objIndex++;
         ritem->Geo = geo;
         ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
@@ -852,8 +791,10 @@ void CrateApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::ve
     {
         auto ri = ritems[i];
 
-        cmdList->IASetVertexBuffers(0, 1, &ri->Geo->VertexBufferView());
-        cmdList->IASetIndexBuffer(&ri->Geo->IndexBufferView());
+        auto vertexBufferView = ri->Geo->VertexBufferView();
+        auto indexBufferView = ri->Geo->IndexBufferView();
+        cmdList->IASetVertexBuffers(0, 1, &vertexBufferView);
+        cmdList->IASetIndexBuffer(&indexBufferView);
         cmdList->IASetPrimitiveTopology(ri->PrimitiveType);
 
         CD3DX12_GPU_DESCRIPTOR_HANDLE tex(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
@@ -868,32 +809,6 @@ void CrateApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::ve
 
         cmdList->DrawIndexedInstanced(ri->IndexCount, 1, ri->StartIndexLocation, ri->BaseVertexLocation, 0);
     }
-}
-
-void CrateApp::DrawDirLight()
-{
-    mCommandList->SetPipelineState(_dirLightPSO.Get());
-
-    mCommandList->SetGraphicsRootSignature(_dirLightRootSignature.Get());
-
-    ID3D12DescriptorHeap* descriptorHeaps[] = { _gBuffer->SRVHeap()};
-    mCommandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
-
-    _gBuffer->ChangeRTVsState(D3D12_RESOURCE_STATE_COMMON);
-    _gBuffer->ChangeDSVState(D3D12_RESOURCE_STATE_DEPTH_READ);
-
-    CD3DX12_GPU_DESCRIPTOR_HANDLE tex(_gBuffer->SRVHeap()->GetGPUDescriptorHandleForHeapStart());
-
-    mCommandList->SetGraphicsRootDescriptorTable(0, tex);
-
-    auto DirLightCB = mCurrFrameResource->DirLightCB->Resource();
-
-    D3D12_GPU_VIRTUAL_ADDRESS dirLightCBAddress = DirLightCB->GetGPUVirtualAddress();
-
-    mCommandList->SetGraphicsRootConstantBufferView(1, dirLightCBAddress);
-
-
-    mCommandList->DrawInstanced(3, 1, 0, 0);
 }
 
 std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> CrateApp::GetStaticSamplers()
