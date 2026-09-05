@@ -21,7 +21,16 @@ cbuffer cbPerObject : register(b0)
 {
     float4x4 gWorld;
     float4x4 gTexTransform;
+    int gUseInstancing;
+    float3 gObjectPad;
 };
+
+struct InstanceData
+{
+    float4x4 World;
+};
+
+StructuredBuffer<InstanceData> gInstanceData : register(t3);
 
 cbuffer cbPass : register(b1)
 {
@@ -71,6 +80,7 @@ struct HullIn
     float3 NormalL  : NORMAL;
     float4 TangentL : TANGENT;
     float2 TexC     : TEXCOORD;
+    nointerpolation uint InstanceId : INSTANCEID;
 };
 
 struct HullPatchConstants
@@ -88,22 +98,28 @@ struct DomainOut
     float2 TexC     : TEXCOORD;
 };
 
-HullIn VS(VertexIn vin)
+HullIn VS(VertexIn vin, uint instanceId : SV_InstanceID)
 {
     HullIn output;
     output.PosL = vin.PosL;
     output.NormalL = vin.NormalL;
     output.TangentL = vin.TangentL;
+    output.InstanceId = instanceId;
 
     float4 texC = mul(float4(vin.TexC, 0.0f, 1.0f), gTexTransform);
     output.TexC = mul(texC, gMatTransform).xy;
     return output;
 }
 
-float TessFactorForEdge(float3 aL, float3 bL)
+float4x4 WorldMatrix(uint instanceId)
+{
+    return gUseInstancing != 0 ? gInstanceData[instanceId].World : gWorld;
+}
+
+float TessFactorForEdge(float3 aL, float3 bL, uint instanceId)
 {
     // Both triangles sharing an edge calculate the same factor from its midpoint.
-    float3 midpointW = mul(float4(0.5f * (aL + bL), 1.0f), gWorld).xyz;
+    float3 midpointW = mul(float4(0.5f * (aL + bL), 1.0f), WorldMatrix(instanceId)).xyz;
     float distanceToCamera = distance(midpointW, gEyePosW);
     float range = max(gMaxTessDistance - gMinTessDistance, 0.001f);
     float falloff = saturate((distanceToCamera - gMinTessDistance) / range);
@@ -113,9 +129,10 @@ float TessFactorForEdge(float3 aL, float3 bL)
 HullPatchConstants PatchHS(InputPatch<HullIn, 3> patch, uint patchId : SV_PrimitiveID)
 {
     HullPatchConstants output;
-    output.EdgeTess[0] = TessFactorForEdge(patch[1].PosL, patch[2].PosL);
-    output.EdgeTess[1] = TessFactorForEdge(patch[2].PosL, patch[0].PosL);
-    output.EdgeTess[2] = TessFactorForEdge(patch[0].PosL, patch[1].PosL);
+    const uint instanceId = patch[0].InstanceId;
+    output.EdgeTess[0] = TessFactorForEdge(patch[1].PosL, patch[2].PosL, instanceId);
+    output.EdgeTess[1] = TessFactorForEdge(patch[2].PosL, patch[0].PosL, instanceId);
+    output.EdgeTess[2] = TessFactorForEdge(patch[0].PosL, patch[1].PosL, instanceId);
     output.InsideTess = (output.EdgeTess[0] + output.EdgeTess[1] + output.EdgeTess[2]) / 3.0f;
     return output;
 }
@@ -153,11 +170,12 @@ DomainOut DS(HullPatchConstants patchConstants, float3 bary : SV_DomainLocation,
         posL += normalL * (height * gDisplacementScale);
     }
 
-    float4 posW = mul(float4(posL, 1.0f), gWorld);
+    const float4x4 world = WorldMatrix(patch[0].InstanceId);
+    float4 posW = mul(float4(posL, 1.0f), world);
     output.PosW = posW.xyz;
     output.PosH = mul(posW, gViewProj);
-    output.NormalW = normalize(mul(normalL, (float3x3)gWorld));
-    output.TangentW = float4(normalize(mul(tangentL.xyz, (float3x3)gWorld)), tangentL.w);
+    output.NormalW = normalize(mul(normalL, (float3x3)world));
+    output.TangentW = float4(normalize(mul(tangentL.xyz, (float3x3)world)), tangentL.w);
     return output;
 }
 

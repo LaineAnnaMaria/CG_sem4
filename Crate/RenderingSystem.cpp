@@ -132,15 +132,17 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
         // Every material owns three contiguous descriptors: diffuse, normal, displacement.
         texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0);
 
-        CD3DX12_ROOT_PARAMETER slotRootParameter[4];
+        CD3DX12_ROOT_PARAMETER slotRootParameter[5];
         // The domain shader samples displacement, while the pixel shader samples color/normal.
         slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_ALL);
         slotRootParameter[1].InitAsConstantBufferView(0);
         slotRootParameter[2].InitAsConstantBufferView(1);
         slotRootParameter[3].InitAsConstantBufferView(2);
+        // Visible instance transforms are compacted into this structured buffer each frame.
+        slotRootParameter[4].InitAsShaderResourceView(3);
 
         const auto staticSamplers = GetStaticSamplers();
-        CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(4, slotRootParameter,
+        CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(5, slotRootParameter,
             static_cast<UINT>(staticSamplers.size()), staticSamplers.data(),
             D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 

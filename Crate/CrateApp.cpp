@@ -13,6 +13,9 @@
 #include "imgui/backends/imgui_impl_dx12.h"
 #include "imgui/backends/imgui_impl_win32.h"
 
+#include <array>
+#include <limits>
+
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
     HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
 
@@ -58,6 +61,18 @@ struct RenderItem
     UINT StartIndexLocation = 0;
     int BaseVertexLocation = 0;
     UINT ModelIndex = 0;
+
+    // Bounds are kept in world space so both the linear and octree culling
+    // paths can test the same render items.
+    BoundingBox WorldBounds;
+    bool IsScatteredObject = false;
+};
+
+struct OctreeNode
+{
+    BoundingBox Bounds;
+    std::vector<RenderItem*> Items;
+    std::array<std::unique_ptr<OctreeNode>, 8> Children;
 };
 
 struct LoadedModel
@@ -112,6 +127,13 @@ private:
     void BuildMaterials();
     void BuildLights();
     void BuildRenderItems();
+    void BuildOctree();
+    std::unique_ptr<OctreeNode> BuildOctreeNode(const BoundingBox& bounds,
+        const std::vector<RenderItem*>& items, UINT depth);
+    void UpdateWorldFrustum();
+    void CollectOctreeItems(const OctreeNode& node, ContainmentType parentContainment);
+    void CollectAllOctreeItems(const OctreeNode& node);
+    bool IsRenderItemEnabled(const RenderItem& item) const;
     void DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems);
     void InitializeImGui();
     void DrawImGui();
@@ -139,6 +161,21 @@ private:
 
     // Render items divided by PSO.
     std::vector<RenderItem*> mOpaqueRitems;
+    std::vector<RenderItem*> mVisibleRitems;
+    std::unique_ptr<OctreeNode> mOctreeRoot;
+    BoundingFrustum mWorldFrustum;
+
+    bool mEnableFrustumCulling = true;
+    bool mEnableOctreeCulling = false;
+    bool mShowScatteredObjects = true;
+    UINT mSubmittedObjectCount = 0;
+    UINT mCulledObjectCount = 0;
+    UINT mOctreeNodesTested = 0;
+    UINT mGeometryDrawCallCount = 0;
+    UINT mScatteredInstancesSubmitted = 0;
+    static constexpr UINT ScatterObjectCount = 1024;
+    static constexpr UINT OctreeLeafCapacity = 16;
+    static constexpr UINT OctreeMaxDepth = 6;
 
     PassConstants mMainPassCB;
     LightConstants mLightCB;
@@ -266,6 +303,7 @@ bool CrateApp::Initialize()
     BuildLights();
     BuildDescriptorHeaps();
     BuildRenderItems();
+    BuildOctree();
     BuildFrameResources();
 
     RenderingSystem::BuildContext renderBuildContext;
@@ -483,6 +521,7 @@ void CrateApp::UpdateCamera(const GameTimer& gt)
 
     XMMATRIX view = XMMatrixLookAtLH(pos, target, up);
     XMStoreFloat4x4(&mView, view);
+    UpdateWorldFrustum();
 }
 
 void CrateApp::AnimateMaterials(const GameTimer& gt)
@@ -505,6 +544,7 @@ void CrateApp::UpdateObjectCBs(const GameTimer& gt)
             ObjectConstants objConstants;
             XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(world));
             XMStoreFloat4x4(&objConstants.TexTransform, XMMatrixTranspose(texTransform));
+            objConstants.UseInstancing = e->IsScatteredObject ? 1 : 0;
 
             currObjectCB->CopyData(e->ObjCBIndex, objConstants);
 
@@ -643,6 +683,24 @@ void CrateApp::DrawImGui()
 
     for (LoadedModel& model : mModels)
         ImGui::Checkbox(model.Name.c_str(), &model.Visible);
+
+    ImGui::Checkbox("Scattered objects", &mShowScatteredObjects);
+    ImGui::Text("Scattered population: %u", ScatterObjectCount);
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Visibility culling:");
+    ImGui::Checkbox("Frustum culling", &mEnableFrustumCulling);
+    ImGui::Checkbox("Frustum culling with octree", &mEnableOctreeCulling);
+
+    const char* cullingMode = mEnableOctreeCulling ? "Octree" :
+        (mEnableFrustumCulling ? "Linear" : "Disabled");
+    ImGui::Text("Active mode: %s", cullingMode);
+    ImGui::Text("Submitted: %u / %zu", mSubmittedObjectCount, mOpaqueRitems.size());
+    ImGui::Text("Culled: %u", mCulledObjectCount);
+    ImGui::Text("Geometry draw calls: %u", mGeometryDrawCallCount);
+    ImGui::Text("Boxes in instanced draw: %u", mScatteredInstancesSubmitted);
+    if (mEnableOctreeCulling)
+        ImGui::Text("Octree nodes tested: %u", mOctreeNodesTested);
 
     ImGui::Separator();
     if (ImGui::SliderFloat("Walnut displacement", &mWalnutDisplacementScale,
@@ -795,6 +853,9 @@ void CrateApp::BuildShapeGeometry()
                 vertices.push_back(v);
             }
 
+            BoundingBox::CreateFromPoints(submesh.Bounds, mesh->mNumVertices,
+                &vertices[submesh.BaseVertexLocation].Pos, sizeof(Vertex));
+
             for (UINT i = 0; i < mesh->mNumFaces; ++i)
             {
                 const aiFace& face = mesh->mFaces[i];
@@ -874,6 +935,7 @@ void CrateApp::BuildLightVolumeGeometry()
     submesh.IndexCount = (UINT)indices.size();
     submesh.StartIndexLocation = 0;
     submesh.BaseVertexLocation = 0;
+    submesh.Bounds = BoundingBox({ 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 1.0f });
 
     geo->DrawArgs["box"] = submesh;
     mGeometries[geo->Name] = std::move(geo);
@@ -884,7 +946,7 @@ void CrateApp::BuildFrameResources()
     for (int i = 0; i < gNumFrameResources; ++i)
     {
         mFrameResources.push_back(std::make_unique<FrameResource>(md3dDevice.Get(),
-            1, (UINT)mAllRitems.size(), (UINT)mMaterials.size()));
+            1, (UINT)mAllRitems.size(), (UINT)mMaterials.size(), ScatterObjectCount));
     }
 }
 
@@ -1000,6 +1062,8 @@ void CrateApp::BuildRenderItems()
         ritem->StartIndexLocation = submesh.StartIndexLocation;
         ritem->BaseVertexLocation = submesh.BaseVertexLocation;
 
+        submesh.Bounds.Transform(ritem->WorldBounds, XMLoadFloat4x4(&ritem->World));
+
         std::string matName = "mat" + std::to_string(submesh.MaterialIndex);
         auto matIter = mMaterials.find(matName);
         if (matIter != mMaterials.end())
@@ -1010,8 +1074,168 @@ void CrateApp::BuildRenderItems()
         mAllRitems.push_back(std::move(ritem));
     }
 
+    // A regular, deterministic field makes culling differences easy to see and
+    // keeps the assignment reproducible.  The box geometry is shared; only the
+    // per-object transform and constant-buffer slot are unique.
+    MeshGeometry* scatterGeo = mGeometries.at("lightVolumeGeo").get();
+    const SubmeshGeometry& scatterSubmesh = scatterGeo->DrawArgs.at("box");
+    Material* scatterMaterial = mMaterials.at("mat0").get();
+    constexpr UINT sideLength = 32;
+    constexpr float spacing = 16.0f;
+
+    for (UINT z = 0; z < sideLength; ++z)
+    {
+        for (UINT x = 0; x < sideLength; ++x)
+        {
+            const float worldX = (static_cast<float>(x) - 0.5f * (sideLength - 1)) * spacing;
+            const float worldZ = (static_cast<float>(z) - 0.5f * (sideLength - 1)) * spacing;
+            const float scale = 1.4f + 0.35f * sinf(static_cast<float>(x * 13 + z * 7));
+            const float worldY = -3.0f + 2.0f * sinf(static_cast<float>(x) * 0.47f) *
+                cosf(static_cast<float>(z) * 0.39f);
+
+            auto ritem = std::make_unique<RenderItem>();
+            XMMATRIX world = XMMatrixScaling(scale, scale, scale) *
+                XMMatrixRotationY(0.31f * static_cast<float>(x + z)) *
+                XMMatrixTranslation(worldX, worldY, worldZ);
+            XMStoreFloat4x4(&ritem->World, world);
+            ritem->ObjCBIndex = objIndex++;
+            ritem->ModelIndex = (std::numeric_limits<UINT>::max)();
+            ritem->Geo = scatterGeo;
+            ritem->Mat = scatterMaterial;
+            ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST;
+            ritem->IndexCount = scatterSubmesh.IndexCount;
+            ritem->StartIndexLocation = scatterSubmesh.StartIndexLocation;
+            ritem->BaseVertexLocation = scatterSubmesh.BaseVertexLocation;
+            ritem->IsScatteredObject = true;
+            scatterSubmesh.Bounds.Transform(ritem->WorldBounds, world);
+            mAllRitems.push_back(std::move(ritem));
+        }
+    }
+
     for (auto& e : mAllRitems)
         mOpaqueRitems.push_back(e.get());
+
+    mVisibleRitems.reserve(mOpaqueRitems.size());
+}
+
+void CrateApp::BuildOctree()
+{
+    if (mOpaqueRitems.empty())
+        return;
+
+    BoundingBox sceneBounds = mOpaqueRitems.front()->WorldBounds;
+    for (size_t i = 1; i < mOpaqueRitems.size(); ++i)
+        BoundingBox::CreateMerged(sceneBounds, sceneBounds, mOpaqueRitems[i]->WorldBounds);
+
+    const float halfSize = (std::max)(sceneBounds.Extents.x,
+        (std::max)(sceneBounds.Extents.y, sceneBounds.Extents.z));
+    sceneBounds.Extents = { halfSize, halfSize, halfSize };
+    mOctreeRoot = BuildOctreeNode(sceneBounds, mOpaqueRitems, 0);
+}
+
+std::unique_ptr<OctreeNode> CrateApp::BuildOctreeNode(const BoundingBox& bounds,
+    const std::vector<RenderItem*>& items, UINT depth)
+{
+    auto node = std::make_unique<OctreeNode>();
+    node->Bounds = bounds;
+    if (items.size() <= OctreeLeafCapacity || depth >= OctreeMaxDepth)
+    {
+        node->Items = items;
+        return node;
+    }
+
+    const XMFLOAT3 childExtents = { bounds.Extents.x * 0.5f,
+        bounds.Extents.y * 0.5f, bounds.Extents.z * 0.5f };
+    std::array<BoundingBox, 8> childBounds;
+    std::array<std::vector<RenderItem*>, 8> childItems;
+
+    for (UINT i = 0; i < 8; ++i)
+    {
+        const XMFLOAT3 offset = {
+            (i & 1) ? childExtents.x : -childExtents.x,
+            (i & 2) ? childExtents.y : -childExtents.y,
+            (i & 4) ? childExtents.z : -childExtents.z
+        };
+        childBounds[i] = BoundingBox(
+            { bounds.Center.x + offset.x, bounds.Center.y + offset.y, bounds.Center.z + offset.z },
+            childExtents);
+    }
+
+    for (RenderItem* item : items)
+    {
+        UINT childIndex = 0;
+        if (item->WorldBounds.Center.x >= bounds.Center.x) childIndex |= 1;
+        if (item->WorldBounds.Center.y >= bounds.Center.y) childIndex |= 2;
+        if (item->WorldBounds.Center.z >= bounds.Center.z) childIndex |= 4;
+
+        if (childBounds[childIndex].Contains(item->WorldBounds) == CONTAINS)
+            childItems[childIndex].push_back(item);
+        else
+            node->Items.push_back(item);
+    }
+
+    for (UINT i = 0; i < 8; ++i)
+    {
+        if (!childItems[i].empty())
+            node->Children[i] = BuildOctreeNode(childBounds[i], childItems[i], depth + 1);
+    }
+
+    return node;
+}
+
+void CrateApp::UpdateWorldFrustum()
+{
+    BoundingFrustum viewFrustum;
+    BoundingFrustum::CreateFromMatrix(viewFrustum, XMLoadFloat4x4(&mProj));
+    XMMATRIX view = XMLoadFloat4x4(&mView);
+    XMMATRIX inverseView = XMMatrixInverse(nullptr, view);
+    viewFrustum.Transform(mWorldFrustum, inverseView);
+}
+
+bool CrateApp::IsRenderItemEnabled(const RenderItem& item) const
+{
+    if (item.IsScatteredObject)
+        return mShowScatteredObjects;
+    return item.ModelIndex < mModels.size() && mModels[item.ModelIndex].Visible;
+}
+
+void CrateApp::CollectAllOctreeItems(const OctreeNode& node)
+{
+    for (RenderItem* item : node.Items)
+    {
+        if (IsRenderItemEnabled(*item))
+            mVisibleRitems.push_back(item);
+    }
+    for (const auto& child : node.Children)
+    {
+        if (child)
+            CollectAllOctreeItems(*child);
+    }
+}
+
+void CrateApp::CollectOctreeItems(const OctreeNode& node, ContainmentType parentContainment)
+{
+    ++mOctreeNodesTested;
+    const ContainmentType containment = parentContainment == CONTAINS ? CONTAINS :
+        mWorldFrustum.Contains(node.Bounds);
+    if (containment == DISJOINT)
+        return;
+    if (containment == CONTAINS)
+    {
+        CollectAllOctreeItems(node);
+        return;
+    }
+
+    for (RenderItem* item : node.Items)
+    {
+        if (IsRenderItemEnabled(*item) && mWorldFrustum.Contains(item->WorldBounds) != DISJOINT)
+            mVisibleRitems.push_back(item);
+    }
+    for (const auto& child : node.Children)
+    {
+        if (child)
+            CollectOctreeItems(*child, INTERSECTS);
+    }
 }
 
 void CrateApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems)
@@ -1021,15 +1245,37 @@ void CrateApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::ve
 
     auto objectCB = mCurrFrameResource->ObjectCB->Resource();
     auto matCB = mCurrFrameResource->MaterialCB->Resource();
+    auto instanceBuffer = mCurrFrameResource->InstanceBuffer->Resource();
+    cmdList->SetGraphicsRootShaderResourceView(4, instanceBuffer->GetGPUVirtualAddress());
 
-    // For each render item...
-    for (size_t i = 0; i < ritems.size(); ++i)
+    mVisibleRitems.clear();
+    mOctreeNodesTested = 0;
+
+    if (mEnableOctreeCulling && mOctreeRoot)
     {
-        auto ri = ritems[i];
+        CollectOctreeItems(*mOctreeRoot, INTERSECTS);
+    }
+    else
+    {
+        for (RenderItem* item : ritems)
+        {
+            if (!IsRenderItemEnabled(*item))
+                continue;
+            if (!mEnableFrustumCulling || mWorldFrustum.Contains(item->WorldBounds) != DISJOINT)
+                mVisibleRitems.push_back(item);
+        }
+    }
 
-        if (!mModels.at(ri->ModelIndex).Visible)
-            continue;
+    mSubmittedObjectCount = static_cast<UINT>(mVisibleRitems.size());
+    UINT enabledCount = 0;
+    for (RenderItem* item : ritems)
+        enabledCount += IsRenderItemEnabled(*item) ? 1u : 0u;
+    mCulledObjectCount = enabledCount - mSubmittedObjectCount;
+    mGeometryDrawCallCount = 0;
+    mScatteredInstancesSubmitted = 0;
 
+    auto bindRenderItem = [&](RenderItem* ri)
+    {
         auto vertexBufferView = ri->Geo->VertexBufferView();
         auto indexBufferView = ri->Geo->IndexBufferView();
         cmdList->IASetVertexBuffers(0, 1, &vertexBufferView);
@@ -1045,8 +1291,39 @@ void CrateApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::ve
         cmdList->SetGraphicsRootDescriptorTable(0, tex);
         cmdList->SetGraphicsRootConstantBufferView(1, objCBAddress);
         cmdList->SetGraphicsRootConstantBufferView(3, matCBAddress);
+    };
 
+    RenderItem* scatteredPrototype = nullptr;
+    UINT scatteredInstanceCount = 0;
+
+    // Imported meshes retain their existing per-object draws.  Visible scattered
+    // objects are compacted into a contiguous GPU buffer for one batched draw.
+    for (RenderItem* ri : mVisibleRitems)
+    {
+        if (ri->IsScatteredObject)
+        {
+            if (scatteredPrototype == nullptr)
+                scatteredPrototype = ri;
+
+            InstanceData instanceData;
+            XMMATRIX world = XMLoadFloat4x4(&ri->World);
+            XMStoreFloat4x4(&instanceData.World, XMMatrixTranspose(world));
+            mCurrFrameResource->InstanceBuffer->CopyData(scatteredInstanceCount++, instanceData);
+            continue;
+        }
+
+        bindRenderItem(ri);
         cmdList->DrawIndexedInstanced(ri->IndexCount, 1, ri->StartIndexLocation, ri->BaseVertexLocation, 0);
+        ++mGeometryDrawCallCount;
+    }
+
+    if (scatteredPrototype != nullptr && scatteredInstanceCount > 0)
+    {
+        bindRenderItem(scatteredPrototype);
+        cmdList->DrawIndexedInstanced(scatteredPrototype->IndexCount, scatteredInstanceCount,
+            scatteredPrototype->StartIndexLocation, scatteredPrototype->BaseVertexLocation, 0);
+        mScatteredInstancesSubmitted = scatteredInstanceCount;
+        ++mGeometryDrawCallCount;
     }
 }
 

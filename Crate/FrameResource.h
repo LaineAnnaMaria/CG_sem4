@@ -50,6 +50,13 @@ struct ObjectConstants
 {
     DirectX::XMFLOAT4X4 World = MathHelper::Identity4x4();
 	DirectX::XMFLOAT4X4 TexTransform = MathHelper::Identity4x4();
+    int UseInstancing = 0;
+    DirectX::XMFLOAT3 Pad = { 0.0f, 0.0f, 0.0f };
+};
+
+struct InstanceData
+{
+    DirectX::XMFLOAT4X4 World = MathHelper::Identity4x4();
 };
 
 struct PassConstants
@@ -86,7 +93,8 @@ struct FrameResource
 {
 public:
     
-    FrameResource(ID3D12Device* device, UINT passCount, UINT objectCount, UINT materialCount);
+    FrameResource(ID3D12Device* device, UINT passCount, UINT objectCount, UINT materialCount,
+        UINT instanceCount);
     FrameResource(const FrameResource& rhs) = delete;
     FrameResource& operator=(const FrameResource& rhs) = delete;
     ~FrameResource();
@@ -101,6 +109,7 @@ public:
     std::unique_ptr<UploadBuffer<PassConstants>> PassCB = nullptr;
     std::unique_ptr<UploadBuffer<MaterialConstants>> MaterialCB = nullptr;
     std::unique_ptr<UploadBuffer<ObjectConstants>> ObjectCB = nullptr;
+    std::unique_ptr<UploadBuffer<InstanceData>> InstanceBuffer = nullptr;
     std::unique_ptr<UploadBuffer<LightConstants>> LightCB = nullptr;
 
     // Fence value to mark commands up to this fence point.  This lets us
