@@ -1,6 +1,10 @@
 Texture2D gDiffuseMap : register(t0);
 Texture2D gNormalMap : register(t1);
 Texture2D gDepthMap : register(t2);
+Texture2DArray gCascadeShadowMap : register(t3);
+SamplerComparisonState gShadowSampler : register(s0);
+
+#include "Fullscreen.hlsl"
 
 #define MAX_POINT_LIGHTS 8
 #define MAX_SPOT_LIGHTS 4
@@ -44,11 +48,6 @@ cbuffer cbLight : register(b0)
     SpotLight gSpotLights[MAX_SPOT_LIGHTS];
 }
 
-struct VertexOut
-{
-    float4 PosH : SV_POSITION;
-};
-
 struct LocalVertexIn
 {
     float3 PosL : POSITION;
@@ -79,13 +78,20 @@ cbuffer cbPass : register(b1)
     float gDeltaTime;
 };
 
-VertexOut VS(uint id : SV_VertexID)
+#define SHADOW_CASCADE_COUNT 3
+
+struct Cascade
 {
-    VertexOut vout;
-    float2 positions[3] = { float2(-1, -1), float2(-1, 3), float2(3, -1) };
-    vout.PosH = float4(positions[id], 0, 1);
-    return vout;
-}
+    float SplitNear;
+    float SplitFar;
+    float2 Pad;
+    float4x4 ViewProj;
+};
+
+cbuffer cbCascades : register(b2)
+{
+    Cascade gCascades[SHADOW_CASCADE_COUNT];
+};
 
 float3 ReconstructWorldPosition(float2 pixel, float depth, float2 size)
 {
@@ -103,7 +109,47 @@ float3 ApplyLight(float3 albedo, float3 normal, float3 viewDir, float3 lightDir,
     return albedo * lightColor * nDotL * intensity + lightColor * specular * 0.25f * intensity;
 }
 
-float4 PS(VertexOut pin) : SV_Target
+float CascadeShadowFactor(float3 posW, float3 normalW, float3 lightDir)
+{
+    const float viewDepth = mul(float4(posW, 1.0f), gView).z;
+    int cascadeIndex = SHADOW_CASCADE_COUNT - 1;
+    [unroll]
+    for (int i = 0; i < SHADOW_CASCADE_COUNT; ++i)
+    {
+        if (viewDepth <= gCascades[i].SplitFar)
+        {
+            cascadeIndex = i;
+            break;
+        }
+    }
+
+    const float4 lightPosition = mul(float4(posW, 1.0f), gCascades[cascadeIndex].ViewProj);
+    const float3 ndc = lightPosition.xyz / lightPosition.w;
+    const float2 uv = float2(ndc.x * 0.5f + 0.5f, 0.5f - ndc.y * 0.5f);
+    if (ndc.z <= 0.0f || ndc.z >= 1.0f || any(uv < 0.0f) || any(uv > 1.0f))
+        return 1.0f;
+
+    uint width;
+    uint height;
+    uint layers;
+    gCascadeShadowMap.GetDimensions(width, height, layers);
+    const float2 texelSize = 1.0f / float2(width, height);
+    const float bias = max(0.00035f, 0.0015f * (1.0f - saturate(dot(normalW, lightDir))));
+    float visibility = 0.0f;
+    [unroll]
+    for (int y = -1; y <= 1; ++y)
+    {
+        [unroll]
+        for (int x = -1; x <= 1; ++x)
+        {
+            visibility += gCascadeShadowMap.SampleCmpLevelZero(gShadowSampler,
+                float3(uv + float2(x, y) * texelSize, cascadeIndex), ndc.z - bias);
+        }
+    }
+    return visibility / 9.0f;
+}
+
+float4 PS(FullscreenVertexOut pin) : SV_Target
 {
     int3 coord = int3(pin.PosH.xy, 0);
     float4 albedo = gDiffuseMap.Load(coord);
@@ -122,7 +168,9 @@ float4 PS(VertexOut pin) : SV_Target
     float3 color = albedo.rgb * gAmbientStrength;
 
     float3 directionalDir = normalize(-gDirectional.Direction);
-    color += ApplyLight(albedo.rgb, normal, viewDir, directionalDir, gDirectional.Color, gDirectional.Intensity);
+    const float shadow = CascadeShadowFactor(posW, normal, directionalDir);
+    color += shadow * ApplyLight(albedo.rgb, normal, viewDir, directionalDir,
+        gDirectional.Color, gDirectional.Intensity);
 
     return float4(saturate(color), 1.0f);
 }

@@ -12,7 +12,7 @@ GBuffer::GBuffer(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, int w
 
 	//creating heap for our info
 	D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc{};
-	rtvHeapDesc.NumDescriptors = (int)GBufferInfo::Count;
+	rtvHeapDesc.NumDescriptors = RtvDescriptorCount;
 	rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
 	rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 	rtvHeapDesc.NodeMask = 0;
@@ -20,7 +20,7 @@ GBuffer::GBuffer(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, int w
 		&rtvHeapDesc, IID_PPV_ARGS(_infoRTVHeap.GetAddressOf())));
 
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = rtvHeapDesc;
-	srvHeapDesc.NumDescriptors = (int)GBufferInfo::Count + 1;
+	srvHeapDesc.NumDescriptors = SrvDescriptorCount;
 	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 	ThrowIfFailed(_device->CreateDescriptorHeap(
@@ -65,7 +65,9 @@ void GBuffer::OnResize(int width, int height)
 			rtvHandle.Offset(1, _rtvDescriptorSize);
 	}
 
-	_srvHandleForLighting = srvHandle;
+	CD3DX12_CPU_DESCRIPTOR_HANDLE shadowSrvHandle(
+		_infoSRVHeap->GetCPUDescriptorHandleForHeapStart(), ShadowSrvIndex, _srvDescriptorSize);
+	_srvHandleForLighting = shadowSrvHandle;
 }
 
 void GBuffer::CreateGBufferTexture(int i, CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHeapHandle, CD3DX12_CPU_DESCRIPTOR_HANDLE srvHeapHandle,

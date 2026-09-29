@@ -9,11 +9,14 @@
   <component name="ChangeListManager">
     <list default="true" id="a2de895a-4bc6-40d0-a149-3e7a9a0994c2" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/.idea.Crate/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/.idea.Crate/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Crate.vcxproj" beforeDir="false" afterPath="$PROJECT_DIR$/Crate.vcxproj" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Crate.vcxproj.filters" beforeDir="false" afterPath="$PROJECT_DIR$/Crate.vcxproj.filters" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/CrateApp.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/CrateApp.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/FrameResource.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/FrameResource.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/FrameResource.h" beforeDir="false" afterPath="$PROJECT_DIR$/FrameResource.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/RenderingSystem.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/RenderingSystem.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Shaders/Default.hlsl" beforeDir="false" afterPath="$PROJECT_DIR$/Shaders/Default.hlsl" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/RenderingSystem.h" beforeDir="false" afterPath="$PROJECT_DIR$/RenderingSystem.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Shaders/DirLight.hlsl" beforeDir="false" afterPath="$PROJECT_DIR$/Shaders/DirLight.hlsl" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/imgui.ini" beforeDir="false" afterPath="$PROJECT_DIR$/imgui.ini" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -42,7 +45,13 @@
   <component name="HighlightingSettingsPerFile">
     <setting file="file://$PROJECT_DIR$/Shaders/Default.hlsl" root0="FORCE_HIGHLIGHTING" />
     <setting file="file://$PROJECT_DIR$/Shaders/DirLight.hlsl" root0="FORCE_HIGHLIGHTING" />
+    <setting file="file://$PROJECT_DIR$/Shaders/LightingUtil.hlsl" root0="FORCE_HIGHLIGHTING" />
     <setting file="file://$PROJECT_DIR$/imgui/misc/fonts/binary_to_compressed_c.cpp" root0="FORCE_HIGHLIGHTING" />
+    <setting file="mock://C:/Projects/Graphics Projects/CG_4SemLabs/CG_sem4/Crate/CrateApp.cpp" root0="SKIP_HIGHLIGHTING" />
+    <setting file="mock://C:/Projects/Graphics Projects/CG_4SemLabs/CG_sem4/Crate/FrameResource.cpp" root0="SKIP_HIGHLIGHTING" />
+    <setting file="mock://C:/Projects/Graphics Projects/CG_4SemLabs/CG_sem4/Crate/FrameResource.h" root0="SKIP_HIGHLIGHTING" />
+    <setting file="mock://C:/Projects/Graphics Projects/CG_4SemLabs/CG_sem4/Crate/RenderingSystem.cpp" root0="SKIP_HIGHLIGHTING" />
+    <setting file="mock://C:/Projects/Graphics Projects/CG_4SemLabs/CG_sem4/Crate/RenderingSystem.h" root0="SKIP_HIGHLIGHTING" />
   </component>
   <component name="MetaFilesCheckinStateConfiguration" checkMetaFiles="true" />
   <component name="ProjectColorInfo">{

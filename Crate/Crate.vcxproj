@@ -160,7 +160,9 @@
     <ClCompile Include="Common\MathHelper.cpp" />
     <ClCompile Include="FrameResource.cpp" />
     <ClCompile Include="Helpers.cpp" />
+    <ClCompile Include="ParticleSystem.cpp" />
     <ClCompile Include="RenderingSystem.cpp" />
+    <ClCompile Include="VisibilitySystem.cpp" />
     <ClCompile Include="TextureUploader.cpp" />
     <ClCompile Include="imgui\imgui.cpp" />
     <ClCompile Include="imgui\imgui_draw.cpp" />
@@ -182,7 +184,10 @@
     <ClInclude Include="Common\UploadBuffer.h" />
     <ClInclude Include="FrameResource.h" />
     <ClInclude Include="Helpers.h" />
+    <ClInclude Include="ParticleSystem.h" />
     <ClInclude Include="RenderingSystem.h" />
+    <ClInclude Include="RenderScene.h" />
+    <ClInclude Include="VisibilitySystem.h" />
     <ClInclude Include="TextureUploader.h" />
     <ClInclude Include="imgui\imconfig.h" />
     <ClInclude Include="imgui\imgui.h" />
@@ -194,6 +199,10 @@
     <ClInclude Include="imgui\backends\imgui_impl_win32.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="Shaders\Fullscreen.hlsl" />
+    <None Include="Shaders\Particle.hlsl" />
+    <None Include="Shaders\PostProcess.hlsl" />
+    <None Include="Shaders\Shadow.hlsl" />
     <ProjectReference Include="DirectXTex\DirectXTex_Desktop_2022.vcxproj">
       <Project>{371b9fa9-4c90-4ac6-a123-aced756d6c77}</Project>
     </ProjectReference>

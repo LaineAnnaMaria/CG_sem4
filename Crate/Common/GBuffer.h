@@ -27,6 +27,14 @@ struct GBufferTexture
 class GBuffer
 {
 public:
+	// Descriptor layout is fixed so every pass agrees on the exact slots.
+	static constexpr UINT RenderTargetCount = static_cast<UINT>(GBufferInfo::Count) - 1;
+	static constexpr UINT ShadowSrvIndex = static_cast<UINT>(GBufferInfo::Count);
+	static constexpr UINT SceneColorRtvIndex = RenderTargetCount;
+	static constexpr UINT SceneColorSrvIndex = ShadowSrvIndex + 1;
+	static constexpr UINT RtvDescriptorCount = SceneColorRtvIndex + 1;
+	static constexpr UINT SrvDescriptorCount = SceneColorSrvIndex + 1;
+
 	GBuffer(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, int width, int height);
 	~GBuffer();
 	//onresize
@@ -63,6 +71,27 @@ public:
 	D3D12_CPU_DESCRIPTOR_HANDLE lightingHandle() const
 	{
 		return _srvHandleForLighting;
+	}
+
+	D3D12_CPU_DESCRIPTOR_HANDLE SceneColorRtv() const
+	{
+		auto handle = _infoRTVHeap->GetCPUDescriptorHandleForHeapStart();
+		handle.ptr += static_cast<SIZE_T>(SceneColorRtvIndex) * _rtvDescriptorSize;
+		return handle;
+	}
+
+	D3D12_CPU_DESCRIPTOR_HANDLE SceneColorSrvCpu() const
+	{
+		auto handle = _infoSRVHeap->GetCPUDescriptorHandleForHeapStart();
+		handle.ptr += static_cast<SIZE_T>(SceneColorSrvIndex) * _srvDescriptorSize;
+		return handle;
+	}
+
+	D3D12_GPU_DESCRIPTOR_HANDLE SceneColorSrvGpu() const
+	{
+		auto handle = _infoSRVHeap->GetGPUDescriptorHandleForHeapStart();
+		handle.ptr += static_cast<UINT64>(SceneColorSrvIndex) * _srvDescriptorSize;
+		return handle;
 	}
 
 private:

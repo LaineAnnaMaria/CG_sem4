@@ -6,6 +6,25 @@
 
 constexpr int MaxPointLights = 8;
 constexpr int MaxSpotLights = 4;
+constexpr int ShadowCascadeCount = 3;
+
+struct CascadeConstants
+{
+    float SplitNear = 0.0f;
+    float SplitFar = 0.0f;
+    DirectX::XMFLOAT2 Pad = { 0.0f, 0.0f };
+    DirectX::XMFLOAT4X4 ViewProj = MathHelper::Identity4x4();
+};
+
+struct ShadowConstants
+{
+    DirectX::XMFLOAT4X4 ViewProj = MathHelper::Identity4x4();
+};
+
+struct CascadeSetConstants
+{
+    CascadeConstants Cascades[ShadowCascadeCount];
+};
 
 struct DirectionalLight
 {
@@ -110,7 +129,10 @@ public:
     std::unique_ptr<UploadBuffer<MaterialConstants>> MaterialCB = nullptr;
     std::unique_ptr<UploadBuffer<ObjectConstants>> ObjectCB = nullptr;
     std::unique_ptr<UploadBuffer<InstanceData>> InstanceBuffer = nullptr;
+    std::unique_ptr<UploadBuffer<InstanceData>> ShadowInstanceBuffer = nullptr;
     std::unique_ptr<UploadBuffer<LightConstants>> LightCB = nullptr;
+    std::unique_ptr<UploadBuffer<ShadowConstants>> ShadowCB = nullptr;
+    std::unique_ptr<UploadBuffer<CascadeSetConstants>> CascadeCB = nullptr;
 
     // Fence value to mark commands up to this fence point.  This lets us
     // check if these frame resources are still in use by the GPU.

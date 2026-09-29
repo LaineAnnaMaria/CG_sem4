@@ -10,26 +10,24 @@ TextureUploader::TextureUploader(ID3D12Device* device, ID3D12GraphicsCommandList
     _defaultTextureKey = LoadTexture(L"../Textures/checkboard.dds")->Name;
 }
 
-
 Texture* TextureUploader::LoadTexture(const std::wstring& filename)
 {
+    const std::string key = Helpers::GetNameFromFileName(filename);
+
+    auto it = _textures.find(key);
+    if (it != _textures.end())
+        return it->second.get();
+    
     auto tex = std::make_unique<Texture>();
-    tex->Name = Helpers::GetNameFromFileName(filename);
+    tex->Name = key;
     tex->Filename = filename;
-    Texture* texPtr = tex.get();
-    if (CreateTexture(texPtr) == false)
-    {
-        std::string narrowFilename;
-        narrowFilename.reserve(filename.size());
-        for (const wchar_t character : filename)
-            narrowFilename.push_back(static_cast<char>(character));
-        OutputDebugStringA(("Failed to load texture: " + narrowFilename + ". Using fallback texture.\n").c_str());
-        return _textures[_defaultTextureKey].get();
-    }
+    
+    if (!CreateTexture(tex.get()))
+        return _textures.at(_defaultTextureKey).get();
 
-    _textures[tex->Name] = std::move(tex);
-
-    return texPtr;
+    Texture* result = tex.get();
+    _textures.emplace(key, std::move(tex));
+    return result;
 }
 
 Texture* TextureUploader::GetDefaultTexture() const

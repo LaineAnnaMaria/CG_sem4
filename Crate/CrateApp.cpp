@@ -13,9 +13,6 @@
 #include "imgui/backends/imgui_impl_dx12.h"
 #include "imgui/backends/imgui_impl_win32.h"
 
-#include <array>
-#include <limits>
-
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
     HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
 
@@ -27,53 +24,6 @@ using namespace DirectX::PackedVector;
 #pragma comment(lib, "D3D12.lib")
 
 const int gNumFrameResources = 3;
-
-// Lightweight structure stores parameters to draw a shape.  This will
-// vary from app-to-app.
-struct RenderItem
-{
-    RenderItem() = default;
-
-    // World matrix of the shape that describes the object's local space
-    // relative to the world space, which defines the position, orientation,
-    // and scale of the object in the world.
-    XMFLOAT4X4 World = MathHelper::Identity4x4();
-
-    XMFLOAT4X4 TexTransform = MathHelper::Identity4x4();
-
-    // Dirty flag indicating the object data has changed and we need to update the constant buffer.
-    // Because we have an object cbuffer for each FrameResource, we have to apply the
-    // update to each FrameResource.  Thus, when we modify obect data we should set 
-    // NumFramesDirty = gNumFrameResources so that each frame resource gets the update.
-    int NumFramesDirty = gNumFrameResources;
-
-    // Index into GPU constant buffer corresponding to the ObjectCB for this render item.
-    UINT ObjCBIndex = -1;
-
-    Material* Mat = nullptr;
-    MeshGeometry* Geo = nullptr;
-
-    // Primitive topology.
-    D3D12_PRIMITIVE_TOPOLOGY PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-
-    // DrawIndexedInstanced parameters.
-    UINT IndexCount = 0;
-    UINT StartIndexLocation = 0;
-    int BaseVertexLocation = 0;
-    UINT ModelIndex = 0;
-
-    // Bounds are kept in world space so both the linear and octree culling
-    // paths can test the same render items.
-    BoundingBox WorldBounds;
-    bool IsScatteredObject = false;
-};
-
-struct OctreeNode
-{
-    BoundingBox Bounds;
-    std::vector<RenderItem*> Items;
-    std::array<std::unique_ptr<OctreeNode>, 8> Children;
-};
 
 struct LoadedModel
 {
@@ -113,8 +63,6 @@ private:
     void OnKeyboardInput(const GameTimer& gt);
     void UpdateCamera(const GameTimer& gt);
     void AnimateMaterials(const GameTimer& gt);
-    void UpdateObjectCBs(const GameTimer& gt);
-    void UpdateMaterialCBs(const GameTimer& gt);
     void UpdateMainPassCB(const GameTimer& gt);
     void UpdateLightCB(const GameTimer& gt);
 
@@ -127,18 +75,8 @@ private:
     void BuildMaterials();
     void BuildLights();
     void BuildRenderItems();
-    void BuildOctree();
-    std::unique_ptr<OctreeNode> BuildOctreeNode(const BoundingBox& bounds,
-        const std::vector<RenderItem*>& items, UINT depth);
-    void UpdateWorldFrustum();
-    void CollectOctreeItems(const OctreeNode& node, ContainmentType parentContainment);
-    void CollectAllOctreeItems(const OctreeNode& node);
-    bool IsRenderItemEnabled(const RenderItem& item) const;
-    void DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems);
     void InitializeImGui();
     void DrawImGui();
-
-    std::vector<CD3DX12_STATIC_SAMPLER_DESC> GetStaticSamplers();
 
 private:
 
@@ -159,23 +97,9 @@ private:
     // List of all the render items.
     std::vector<std::unique_ptr<RenderItem>> mAllRitems;
 
-    // Render items divided by PSO.
-    std::vector<RenderItem*> mOpaqueRitems;
-    std::vector<RenderItem*> mVisibleRitems;
-    std::unique_ptr<OctreeNode> mOctreeRoot;
-    BoundingFrustum mWorldFrustum;
-
-    bool mEnableFrustumCulling = true;
-    bool mEnableOctreeCulling = false;
     bool mShowScatteredObjects = true;
-    UINT mSubmittedObjectCount = 0;
-    UINT mCulledObjectCount = 0;
-    UINT mOctreeNodesTested = 0;
     UINT mGeometryDrawCallCount = 0;
     UINT mScatteredInstancesSubmitted = 0;
-    static constexpr UINT ScatterObjectCount = 1024;
-    static constexpr UINT OctreeLeafCapacity = 16;
-    static constexpr UINT OctreeMaxDepth = 6;
 
     PassConstants mMainPassCB;
     LightConstants mLightCB;
@@ -303,7 +227,6 @@ bool CrateApp::Initialize()
     BuildLights();
     BuildDescriptorHeaps();
     BuildRenderItems();
-    BuildOctree();
     BuildFrameResources();
 
     RenderingSystem::BuildContext renderBuildContext;
@@ -313,6 +236,17 @@ bool CrateApp::Initialize()
     renderBuildContext.DepthStencilFormat = mDepthStencilFormat;
     renderBuildContext.MsaaEnabled = m4xMsaaState;
     renderBuildContext.MsaaQuality = m4xMsaaQuality;
+    renderBuildContext.GBufferTarget = _gBuffer.get();
+    renderBuildContext.CmdList = mCommandList.Get();
+    renderBuildContext.SceneSrvHeap = mSrvDescriptorHeap.Get();
+    renderBuildContext.LocalLightVolumeGeo = mGeometries["lightVolumeGeo"].get();
+    renderBuildContext.Viewport = &mScreenViewport;
+    renderBuildContext.ScissorRect = &mScissorRect;
+    renderBuildContext.View = &mView;
+    renderBuildContext.Proj = &mProj;
+    renderBuildContext.DirectionalLightDirection = &mDirectionalLight.Direction;
+    renderBuildContext.RenderItems = &mAllRitems;
+    renderBuildContext.SceneSrvDescriptorSize = mCbvSrvDescriptorSize;
     mRenderingSystem->Initialize(renderBuildContext);
 
     // Execute the initialization commands.
@@ -343,6 +277,9 @@ void CrateApp::OnResize()
 {
     D3DApp::OnResize();
 
+    if (mRenderingSystem != nullptr)
+        mRenderingSystem->OnResize(mClientWidth, mClientHeight);
+
     // The window resized, so update the aspect ratio and recompute the projection matrix.
     XMMATRIX P = XMMatrixPerspectiveFovLH(0.25f * MathHelper::Pi, AspectRatio(), 1.0f, 1000.0f);
     XMStoreFloat4x4(&mProj, P);
@@ -368,8 +305,8 @@ void CrateApp::Update(const GameTimer& gt)
     }
 
     AnimateMaterials(gt);
-    UpdateObjectCBs(gt);
-    UpdateMaterialCBs(gt);
+    RenderingSystem::UpdateObjectConstants(mCurrFrameResource, mAllRitems);
+    RenderingSystem::UpdateMaterialConstants(mCurrFrameResource, mMaterials);
     UpdateMainPassCB(gt);
     UpdateLightCB(gt);
 }
@@ -391,23 +328,11 @@ void CrateApp::Draw(const GameTimer& gt)
     // Reusing the command list reuses memory.
     ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), mRenderingSystem->GeometryPso()));
 
-    RenderingSystem::FrameContext renderContext;
-    renderContext.CmdList = mCommandList.Get();
-    renderContext.GBufferTarget = _gBuffer.get();
-    renderContext.Viewport = mScreenViewport;
-    renderContext.ScissorRect = mScissorRect;
-    renderContext.BackBuffer = CurrentBackBuffer();
-    renderContext.BackBufferView = CurrentBackBufferView();
-    renderContext.SceneSrvHeap = mSrvDescriptorHeap.Get();
-    renderContext.CurrFrameResource = mCurrFrameResource;
-    renderContext.LocalLightVolumeGeo = mGeometries["lightVolumeGeo"].get();
-    renderContext.LocalLightVolumeCount = (UINT)(mPointLights.size() + mSpotLights.size());
-
-    mRenderingSystem->Render(renderContext,
-        [this](ID3D12GraphicsCommandList* cmdList)
-        {
-            DrawRenderItems(cmdList, mOpaqueRitems);
-        });
+    const RenderingSystem::RenderStats renderStats = mRenderingSystem->Render(
+        mCurrFrameResource, CurrentBackBuffer(), CurrentBackBufferView(),
+        static_cast<UINT>(mPointLights.size() + mSpotLights.size()));
+    mGeometryDrawCallCount = renderStats.DrawCalls;
+    mScatteredInstancesSubmitted = renderStats.ScatteredInstances;
 
     // RenderingSystem leaves the swap-chain buffer in PRESENT. Draw ImGui last.
     auto toRenderTarget = CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
@@ -521,70 +446,11 @@ void CrateApp::UpdateCamera(const GameTimer& gt)
 
     XMMATRIX view = XMMatrixLookAtLH(pos, target, up);
     XMStoreFloat4x4(&mView, view);
-    UpdateWorldFrustum();
 }
 
 void CrateApp::AnimateMaterials(const GameTimer& gt)
 {
 
-}
-
-void CrateApp::UpdateObjectCBs(const GameTimer& gt)
-{
-    auto currObjectCB = mCurrFrameResource->ObjectCB.get();
-    for (auto& e : mAllRitems)
-    {
-        // Only update the cbuffer data if the constants have changed.  
-        // This needs to be tracked per frame resource.
-        if (e->NumFramesDirty > 0)
-        {
-            XMMATRIX world = XMLoadFloat4x4(&e->World);
-            XMMATRIX texTransform = XMLoadFloat4x4(&e->TexTransform);
-
-            ObjectConstants objConstants;
-            XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(world));
-            XMStoreFloat4x4(&objConstants.TexTransform, XMMatrixTranspose(texTransform));
-            objConstants.UseInstancing = e->IsScatteredObject ? 1 : 0;
-
-            currObjectCB->CopyData(e->ObjCBIndex, objConstants);
-
-            // Next FrameResource need to be updated too.
-            e->NumFramesDirty--;
-        }
-    }
-}
-
-void CrateApp::UpdateMaterialCBs(const GameTimer& gt)
-{
-    auto currMaterialCB = mCurrFrameResource->MaterialCB.get();
-    for (auto& e : mMaterials)
-    {
-        // Only update the cbuffer data if the constants have changed.  If the cbuffer
-        // data changes, it needs to be updated for each FrameResource.
-        Material* mat = e.second.get();
-        if (mat->NumFramesDirty > 0)
-        {
-            XMMATRIX matTransform = XMLoadFloat4x4(&mat->MatTransform);
-
-            MaterialConstants matConstants;
-            matConstants.DiffuseAlbedo = mat->DiffuseAlbedo;
-            matConstants.FresnelR0 = mat->FresnelR0;
-            matConstants.Roughness = mat->Roughness;
-            matConstants.DisplacementScale = mat->DisplacementScale;
-            matConstants.MinTessDistance = mat->MinTessDistance;
-            matConstants.MaxTessDistance = mat->MaxTessDistance;
-            matConstants.MinTessFactor = mat->MinTessFactor;
-            matConstants.MaxTessFactor = mat->MaxTessFactor;
-            matConstants.UseNormalMap = mat->NormalTexturePath.empty() ? 0 : 1;
-            matConstants.UseDisplacementMap = mat->DisplacementTexturePath.empty() ? 0 : 1;
-            XMStoreFloat4x4(&matConstants.MatTransform, XMMatrixTranspose(matTransform));
-
-            currMaterialCB->CopyData(mat->MatCBIndex, matConstants);
-
-            // Next FrameResource need to be updated too.
-            mat->NumFramesDirty--;
-        }
-    }
 }
 
 void CrateApp::UpdateMainPassCB(const GameTimer& gt)
@@ -607,7 +473,7 @@ void CrateApp::UpdateMainPassCB(const GameTimer& gt)
     mMainPassCB.RenderTargetSize = XMFLOAT2((float)mClientWidth, (float)mClientHeight);
     mMainPassCB.InvRenderTargetSize = XMFLOAT2(1.0f / mClientWidth, 1.0f / mClientHeight);
     mMainPassCB.NearZ = 1.0f;
-    mMainPassCB.FarZ = 5000.0f;
+    mMainPassCB.FarZ = 1000.0f;
     mMainPassCB.TotalTime = gt.TotalTime();
     mMainPassCB.DeltaTime = gt.DeltaTime();
 
@@ -685,22 +551,37 @@ void CrateApp::DrawImGui()
         ImGui::Checkbox(model.Name.c_str(), &model.Visible);
 
     ImGui::Checkbox("Scattered objects", &mShowScatteredObjects);
-    ImGui::Text("Scattered population: %u", ScatterObjectCount);
+    ImGui::Text("Scattered population: %u", RenderingSystem::ScatterObjectCount);
+
+    bool& particlesEnabled = mRenderingSystem->ParticlesEnabled();
+    ImGui::Checkbox("Particles", &particlesEnabled);
+    ImGui::Text("Particle population: %u", ParticleSystem::ParticleCount);
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Post effects:");
+    bool& chromaticAberration = mRenderingSystem->ChromaticAberrationEnabled();
+    bool& vignette = mRenderingSystem->VignetteEnabled();
+    ImGui::Checkbox("Chromatic aberration", &chromaticAberration);
+    ImGui::Checkbox("Vignette", &vignette);
 
     ImGui::Separator();
     ImGui::TextUnformatted("Visibility culling:");
-    ImGui::Checkbox("Frustum culling", &mEnableFrustumCulling);
-    ImGui::Checkbox("Frustum culling with octree", &mEnableOctreeCulling);
+    VisibilitySystem& visibility = mRenderingSystem->Visibility();
+    bool& frustumCulling = visibility.FrustumCullingEnabled();
+    bool& octreeCulling = visibility.OctreeCullingEnabled();
+    ImGui::Checkbox("Frustum culling", &frustumCulling);
+    ImGui::Checkbox("Frustum culling with octree", &octreeCulling);
 
-    const char* cullingMode = mEnableOctreeCulling ? "Octree" :
-        (mEnableFrustumCulling ? "Linear" : "Disabled");
+    const VisibilitySystem::Stats& visibilityStats = visibility.CurrentStats();
+    const char* cullingMode = octreeCulling ? "Octree" :
+        (frustumCulling ? "Linear" : "Disabled");
     ImGui::Text("Active mode: %s", cullingMode);
-    ImGui::Text("Submitted: %u / %zu", mSubmittedObjectCount, mOpaqueRitems.size());
-    ImGui::Text("Culled: %u", mCulledObjectCount);
+    ImGui::Text("Submitted: %u / %zu", visibilityStats.SubmittedObjects, mAllRitems.size());
+    ImGui::Text("Culled: %u", visibilityStats.CulledObjects);
     ImGui::Text("Geometry draw calls: %u", mGeometryDrawCallCount);
     ImGui::Text("Boxes in instanced draw: %u", mScatteredInstancesSubmitted);
-    if (mEnableOctreeCulling)
-        ImGui::Text("Octree nodes tested: %u", mOctreeNodesTested);
+    if (octreeCulling)
+        ImGui::Text("Octree nodes tested: %u", visibilityStats.OctreeNodesTested);
 
     ImGui::Separator();
     if (ImGui::SliderFloat("Walnut displacement", &mWalnutDisplacementScale,
@@ -946,7 +827,7 @@ void CrateApp::BuildFrameResources()
     for (int i = 0; i < gNumFrameResources; ++i)
     {
         mFrameResources.push_back(std::make_unique<FrameResource>(md3dDevice.Get(),
-            1, (UINT)mAllRitems.size(), (UINT)mMaterials.size(), ScatterObjectCount));
+            1, (UINT)mAllRitems.size(), (UINT)mMaterials.size(), RenderingSystem::ScatterObjectCount));
     }
 }
 
@@ -1013,6 +894,17 @@ void CrateApp::BuildMaterials()
             mMaterials[mat->Name] = std::move(mat);
         }
     }
+
+    auto groundMaterial = std::make_unique<Material>();
+    groundMaterial->Name = "ground";
+    groundMaterial->MatCBIndex = static_cast<int>(mMaterials.size());
+    groundMaterial->DiffuseAlbedo = XMFLOAT4(0.32f, 0.34f, 0.37f, 1.0f);
+    groundMaterial->FresnelR0 = XMFLOAT3(0.03f, 0.03f, 0.03f);
+    groundMaterial->Roughness = 0.9f;
+    groundMaterial->DisplacementScale = 0.0f;
+    groundMaterial->MinTessFactor = 1.0f;
+    groundMaterial->MaxTessFactor = 1.0f;
+    mMaterials[groundMaterial->Name] = std::move(groundMaterial);
 }
 
 void CrateApp::BuildLights()
@@ -1046,7 +938,7 @@ void CrateApp::BuildLights()
 void CrateApp::BuildRenderItems()
 {
     auto geo = mGeometries["objGeo"].get();
-    int objIndex = 0;
+    UINT objIndex = 0;
 
     for (auto& pair : geo->DrawArgs)
     {
@@ -1056,6 +948,7 @@ void CrateApp::BuildRenderItems()
         ritem->World = mModels.at(submesh.ModelIndex).World;
         ritem->ObjCBIndex = objIndex++;
         ritem->ModelIndex = submesh.ModelIndex;
+        ritem->Visibility = &mModels.at(submesh.ModelIndex).Visible;
         ritem->Geo = geo;
         ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST;
         ritem->IndexCount = submesh.IndexCount;
@@ -1074,313 +967,25 @@ void CrateApp::BuildRenderItems()
         mAllRitems.push_back(std::move(ritem));
     }
 
-    // A regular, deterministic field makes culling differences easy to see and
-    // keeps the assignment reproducible.  The box geometry is shared; only the
-    // per-object transform and constant-buffer slot are unique.
     MeshGeometry* scatterGeo = mGeometries.at("lightVolumeGeo").get();
     const SubmeshGeometry& scatterSubmesh = scatterGeo->DrawArgs.at("box");
+    auto ground = std::make_unique<RenderItem>();
+    const XMMATRIX groundWorld = XMMatrixScaling(260.0f, 0.25f, 260.0f) *
+        XMMatrixTranslation(0.0f, -5.5f, 0.0f);
+    XMStoreFloat4x4(&ground->World, groundWorld);
+    ground->ObjCBIndex = objIndex++;
+    ground->ModelIndex = UINT_MAX;
+    ground->Geo = scatterGeo;
+    ground->Mat = mMaterials.at("ground").get();
+    ground->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST;
+    ground->IndexCount = scatterSubmesh.IndexCount;
+    ground->StartIndexLocation = scatterSubmesh.StartIndexLocation;
+    ground->BaseVertexLocation = scatterSubmesh.BaseVertexLocation;
+    scatterSubmesh.Bounds.Transform(ground->WorldBounds, groundWorld);
+    mAllRitems.push_back(std::move(ground));
+
     Material* scatterMaterial = mMaterials.at("mat0").get();
-    constexpr UINT sideLength = 32;
-    constexpr float spacing = 16.0f;
-
-    for (UINT z = 0; z < sideLength; ++z)
-    {
-        for (UINT x = 0; x < sideLength; ++x)
-        {
-            const float worldX = (static_cast<float>(x) - 0.5f * (sideLength - 1)) * spacing;
-            const float worldZ = (static_cast<float>(z) - 0.5f * (sideLength - 1)) * spacing;
-            const float scale = 1.4f + 0.35f * sinf(static_cast<float>(x * 13 + z * 7));
-            const float worldY = -3.0f + 2.0f * sinf(static_cast<float>(x) * 0.47f) *
-                cosf(static_cast<float>(z) * 0.39f);
-
-            auto ritem = std::make_unique<RenderItem>();
-            XMMATRIX world = XMMatrixScaling(scale, scale, scale) *
-                XMMatrixRotationY(0.31f * static_cast<float>(x + z)) *
-                XMMatrixTranslation(worldX, worldY, worldZ);
-            XMStoreFloat4x4(&ritem->World, world);
-            ritem->ObjCBIndex = objIndex++;
-            ritem->ModelIndex = (std::numeric_limits<UINT>::max)();
-            ritem->Geo = scatterGeo;
-            ritem->Mat = scatterMaterial;
-            ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST;
-            ritem->IndexCount = scatterSubmesh.IndexCount;
-            ritem->StartIndexLocation = scatterSubmesh.StartIndexLocation;
-            ritem->BaseVertexLocation = scatterSubmesh.BaseVertexLocation;
-            ritem->IsScatteredObject = true;
-            scatterSubmesh.Bounds.Transform(ritem->WorldBounds, world);
-            mAllRitems.push_back(std::move(ritem));
-        }
-    }
-
-    for (auto& e : mAllRitems)
-        mOpaqueRitems.push_back(e.get());
-
-    mVisibleRitems.reserve(mOpaqueRitems.size());
-}
-
-void CrateApp::BuildOctree()
-{
-    if (mOpaqueRitems.empty())
-        return;
-
-    BoundingBox sceneBounds = mOpaqueRitems.front()->WorldBounds;
-    for (size_t i = 1; i < mOpaqueRitems.size(); ++i)
-        BoundingBox::CreateMerged(sceneBounds, sceneBounds, mOpaqueRitems[i]->WorldBounds);
-
-    const float halfSize = (std::max)(sceneBounds.Extents.x,
-        (std::max)(sceneBounds.Extents.y, sceneBounds.Extents.z));
-    sceneBounds.Extents = { halfSize, halfSize, halfSize };
-    mOctreeRoot = BuildOctreeNode(sceneBounds, mOpaqueRitems, 0);
-}
-
-std::unique_ptr<OctreeNode> CrateApp::BuildOctreeNode(const BoundingBox& bounds,
-    const std::vector<RenderItem*>& items, UINT depth)
-{
-    auto node = std::make_unique<OctreeNode>();
-    node->Bounds = bounds;
-    if (items.size() <= OctreeLeafCapacity || depth >= OctreeMaxDepth)
-    {
-        node->Items = items;
-        return node;
-    }
-
-    const XMFLOAT3 childExtents = { bounds.Extents.x * 0.5f,
-        bounds.Extents.y * 0.5f, bounds.Extents.z * 0.5f };
-    std::array<BoundingBox, 8> childBounds;
-    std::array<std::vector<RenderItem*>, 8> childItems;
-
-    for (UINT i = 0; i < 8; ++i)
-    {
-        const XMFLOAT3 offset = {
-            (i & 1) ? childExtents.x : -childExtents.x,
-            (i & 2) ? childExtents.y : -childExtents.y,
-            (i & 4) ? childExtents.z : -childExtents.z
-        };
-        childBounds[i] = BoundingBox(
-            { bounds.Center.x + offset.x, bounds.Center.y + offset.y, bounds.Center.z + offset.z },
-            childExtents);
-    }
-
-    for (RenderItem* item : items)
-    {
-        UINT childIndex = 0;
-        if (item->WorldBounds.Center.x >= bounds.Center.x) childIndex |= 1;
-        if (item->WorldBounds.Center.y >= bounds.Center.y) childIndex |= 2;
-        if (item->WorldBounds.Center.z >= bounds.Center.z) childIndex |= 4;
-
-        if (childBounds[childIndex].Contains(item->WorldBounds) == CONTAINS)
-            childItems[childIndex].push_back(item);
-        else
-            node->Items.push_back(item);
-    }
-
-    for (UINT i = 0; i < 8; ++i)
-    {
-        if (!childItems[i].empty())
-            node->Children[i] = BuildOctreeNode(childBounds[i], childItems[i], depth + 1);
-    }
-
-    return node;
-}
-
-void CrateApp::UpdateWorldFrustum()
-{
-    BoundingFrustum viewFrustum;
-    BoundingFrustum::CreateFromMatrix(viewFrustum, XMLoadFloat4x4(&mProj));
-    XMMATRIX view = XMLoadFloat4x4(&mView);
-    XMMATRIX inverseView = XMMatrixInverse(nullptr, view);
-    viewFrustum.Transform(mWorldFrustum, inverseView);
-}
-
-bool CrateApp::IsRenderItemEnabled(const RenderItem& item) const
-{
-    if (item.IsScatteredObject)
-        return mShowScatteredObjects;
-    return item.ModelIndex < mModels.size() && mModels[item.ModelIndex].Visible;
-}
-
-void CrateApp::CollectAllOctreeItems(const OctreeNode& node)
-{
-    for (RenderItem* item : node.Items)
-    {
-        if (IsRenderItemEnabled(*item))
-            mVisibleRitems.push_back(item);
-    }
-    for (const auto& child : node.Children)
-    {
-        if (child)
-            CollectAllOctreeItems(*child);
-    }
-}
-
-void CrateApp::CollectOctreeItems(const OctreeNode& node, ContainmentType parentContainment)
-{
-    ++mOctreeNodesTested;
-    const ContainmentType containment = parentContainment == CONTAINS ? CONTAINS :
-        mWorldFrustum.Contains(node.Bounds);
-    if (containment == DISJOINT)
-        return;
-    if (containment == CONTAINS)
-    {
-        CollectAllOctreeItems(node);
-        return;
-    }
-
-    for (RenderItem* item : node.Items)
-    {
-        if (IsRenderItemEnabled(*item) && mWorldFrustum.Contains(item->WorldBounds) != DISJOINT)
-            mVisibleRitems.push_back(item);
-    }
-    for (const auto& child : node.Children)
-    {
-        if (child)
-            CollectOctreeItems(*child, INTERSECTS);
-    }
-}
-
-void CrateApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems)
-{
-    UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
-    UINT matCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(MaterialConstants));
-
-    auto objectCB = mCurrFrameResource->ObjectCB->Resource();
-    auto matCB = mCurrFrameResource->MaterialCB->Resource();
-    auto instanceBuffer = mCurrFrameResource->InstanceBuffer->Resource();
-    cmdList->SetGraphicsRootShaderResourceView(4, instanceBuffer->GetGPUVirtualAddress());
-
-    mVisibleRitems.clear();
-    mOctreeNodesTested = 0;
-
-    if (mEnableOctreeCulling && mOctreeRoot)
-    {
-        CollectOctreeItems(*mOctreeRoot, INTERSECTS);
-    }
-    else
-    {
-        for (RenderItem* item : ritems)
-        {
-            if (!IsRenderItemEnabled(*item))
-                continue;
-            if (!mEnableFrustumCulling || mWorldFrustum.Contains(item->WorldBounds) != DISJOINT)
-                mVisibleRitems.push_back(item);
-        }
-    }
-
-    mSubmittedObjectCount = static_cast<UINT>(mVisibleRitems.size());
-    UINT enabledCount = 0;
-    for (RenderItem* item : ritems)
-        enabledCount += IsRenderItemEnabled(*item) ? 1u : 0u;
-    mCulledObjectCount = enabledCount - mSubmittedObjectCount;
-    mGeometryDrawCallCount = 0;
-    mScatteredInstancesSubmitted = 0;
-
-    auto bindRenderItem = [&](RenderItem* ri)
-    {
-        auto vertexBufferView = ri->Geo->VertexBufferView();
-        auto indexBufferView = ri->Geo->IndexBufferView();
-        cmdList->IASetVertexBuffers(0, 1, &vertexBufferView);
-        cmdList->IASetIndexBuffer(&indexBufferView);
-        cmdList->IASetPrimitiveTopology(ri->PrimitiveType);
-
-        D3D12_GPU_DESCRIPTOR_HANDLE tex = mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart();
-        tex.ptr += static_cast<UINT64>(ri->Mat->DiffuseSrvHeapIndex) * mCbvSrvDescriptorSize;
-
-        D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = objectCB->GetGPUVirtualAddress() + ri->ObjCBIndex * objCBByteSize;
-        D3D12_GPU_VIRTUAL_ADDRESS matCBAddress = matCB->GetGPUVirtualAddress() + ri->Mat->MatCBIndex * matCBByteSize;
-
-        cmdList->SetGraphicsRootDescriptorTable(0, tex);
-        cmdList->SetGraphicsRootConstantBufferView(1, objCBAddress);
-        cmdList->SetGraphicsRootConstantBufferView(3, matCBAddress);
-    };
-
-    RenderItem* scatteredPrototype = nullptr;
-    UINT scatteredInstanceCount = 0;
-
-    // Imported meshes retain their existing per-object draws.  Visible scattered
-    // objects are compacted into a contiguous GPU buffer for one batched draw.
-    for (RenderItem* ri : mVisibleRitems)
-    {
-        if (ri->IsScatteredObject)
-        {
-            if (scatteredPrototype == nullptr)
-                scatteredPrototype = ri;
-
-            InstanceData instanceData;
-            XMMATRIX world = XMLoadFloat4x4(&ri->World);
-            XMStoreFloat4x4(&instanceData.World, XMMatrixTranspose(world));
-            mCurrFrameResource->InstanceBuffer->CopyData(scatteredInstanceCount++, instanceData);
-            continue;
-        }
-
-        bindRenderItem(ri);
-        cmdList->DrawIndexedInstanced(ri->IndexCount, 1, ri->StartIndexLocation, ri->BaseVertexLocation, 0);
-        ++mGeometryDrawCallCount;
-    }
-
-    if (scatteredPrototype != nullptr && scatteredInstanceCount > 0)
-    {
-        bindRenderItem(scatteredPrototype);
-        cmdList->DrawIndexedInstanced(scatteredPrototype->IndexCount, scatteredInstanceCount,
-            scatteredPrototype->StartIndexLocation, scatteredPrototype->BaseVertexLocation, 0);
-        mScatteredInstancesSubmitted = scatteredInstanceCount;
-        ++mGeometryDrawCallCount;
-    }
-}
-
-std::vector<CD3DX12_STATIC_SAMPLER_DESC> CrateApp::GetStaticSamplers()
-{
-    // Applications usually only need a handful of samplers.  So just define them all up front
-    // and keep them available as part of the root signature.  
-
-    const CD3DX12_STATIC_SAMPLER_DESC pointWrap(
-        0, // shaderRegister
-        D3D12_FILTER_MIN_MAG_MIP_POINT, // filter
-        D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressU
-        D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressV
-        D3D12_TEXTURE_ADDRESS_MODE_WRAP); // addressW
-
-    const CD3DX12_STATIC_SAMPLER_DESC pointClamp(
-        1, // shaderRegister
-        D3D12_FILTER_MIN_MAG_MIP_POINT, // filter
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressU
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressV
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP); // addressW
-
-    const CD3DX12_STATIC_SAMPLER_DESC linearWrap(
-        2, // shaderRegister
-        D3D12_FILTER_MIN_MAG_MIP_LINEAR, // filter
-        D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressU
-        D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressV
-        D3D12_TEXTURE_ADDRESS_MODE_WRAP); // addressW
-
-    const CD3DX12_STATIC_SAMPLER_DESC linearClamp(
-        3, // shaderRegister
-        D3D12_FILTER_MIN_MAG_MIP_LINEAR, // filter
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressU
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressV
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP); // addressW
-
-    const CD3DX12_STATIC_SAMPLER_DESC anisotropicWrap(
-        4, // shaderRegister
-        D3D12_FILTER_ANISOTROPIC, // filter
-        D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressU
-        D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressV
-        D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressW
-        0.0f,                             // mipLODBias
-        8);                               // maxAnisotropy
-
-    const CD3DX12_STATIC_SAMPLER_DESC anisotropicClamp(
-        5, // shaderRegister
-        D3D12_FILTER_ANISOTROPIC, // filter
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressU
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressV
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressW
-        0.0f,                              // mipLODBias
-        8);                                // maxAnisotropy
-
-    return {
-        pointWrap, pointClamp,
-        linearWrap, linearClamp,
-        anisotropicWrap, anisotropicClamp };
+    RenderingSystem::AppendScatteredBoxes(mAllRitems, objIndex, scatterGeo,
+        scatterSubmesh, scatterMaterial, &mShowScatteredObjects);
 }
 
