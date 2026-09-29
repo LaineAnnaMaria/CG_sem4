@@ -73,6 +73,13 @@ public:
 		return _srvHandleForLighting;
 	}
 
+	D3D12_GPU_DESCRIPTOR_HANDLE InfoSrvGpu(GBufferInfo info) const
+	{
+		auto handle = _infoSRVHeap->GetGPUDescriptorHandleForHeapStart();
+		handle.ptr += static_cast<UINT64>(info) * _srvDescriptorSize;
+		return handle;
+	}
+
 	D3D12_CPU_DESCRIPTOR_HANDLE SceneColorRtv() const
 	{
 		auto handle = _infoRTVHeap->GetCPUDescriptorHandleForHeapStart();

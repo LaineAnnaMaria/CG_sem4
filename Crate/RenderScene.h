@@ -16,6 +16,8 @@ struct RenderItem
     int BaseVertexLocation = 0;
     UINT ModelIndex = 0;
     DirectX::BoundingBox WorldBounds;
+    DirectX::XMFLOAT4 InstanceColor = { 1.0f, 1.0f, 1.0f, 1.0f };
+    float InstanceSize = 1.0f;
     bool IsScatteredObject = false;
     const bool* Visibility = nullptr;
 

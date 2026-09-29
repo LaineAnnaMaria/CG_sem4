@@ -76,6 +76,9 @@ struct ObjectConstants
 struct InstanceData
 {
     DirectX::XMFLOAT4X4 World = MathHelper::Identity4x4();
+    DirectX::XMFLOAT4 Color = { 1.0f, 1.0f, 1.0f, 1.0f };
+    float Size = 1.0f;
+    DirectX::XMFLOAT3 Pad = { 0.0f, 0.0f, 0.0f };
 };
 
 struct PassConstants
@@ -102,7 +105,7 @@ struct Vertex
     DirectX::XMFLOAT3 Pos;
     DirectX::XMFLOAT3 Normal;
     // xyz is the tangent; w preserves the tangent-space handedness.
-    DirectX::XMFLOAT4 TangentU;
+	DirectX::XMFLOAT4 TangentU;
 	DirectX::XMFLOAT2 TexC;
 };
 

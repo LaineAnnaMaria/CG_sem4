@@ -100,6 +100,8 @@ private:
     bool mShowScatteredObjects = true;
     UINT mGeometryDrawCallCount = 0;
     UINT mScatteredInstancesSubmitted = 0;
+    UINT mStaticBatchCount = 0;
+    UINT mStaticBatchedSubmeshCount = 0;
 
     PassConstants mMainPassCB;
     LightConstants mLightCB;
@@ -115,6 +117,9 @@ private:
     float mPhi = 0.4f * XM_PI;
     float mRadius = 100.0f;
     float mWalnutDisplacementScale = 1.5f;
+    bool mHasPreviousCameraPosition = false;
+    XMFLOAT3 mPreviousCameraPosition = { 0.0f, 0.0f, 0.0f };
+    float mCameraMotionAmount = 0.0f;
 
     POINT mLastMousePos;
     TextureUploader _textureLoader;
@@ -429,6 +434,10 @@ void CrateApp::OnMouseMove(WPARAM btnState, int x, int y)
 
 void CrateApp::OnKeyboardInput(const GameTimer& gt)
 {
+    if (d3dUtil::IsKeyDown('2')) mRenderingSystem->GBufferDebugMode() = 1; // Diffuse
+    if (d3dUtil::IsKeyDown('3')) mRenderingSystem->GBufferDebugMode() = 2; // Normals
+    if (d3dUtil::IsKeyDown('4')) mRenderingSystem->GBufferDebugMode() = 3; // Depth
+    if (d3dUtil::IsKeyDown('1')) mRenderingSystem->GBufferDebugMode() = 0; // Lit scene
 }
 
 void CrateApp::UpdateCamera(const GameTimer& gt)
@@ -438,6 +447,21 @@ void CrateApp::UpdateCamera(const GameTimer& gt)
     mEyePos.x = focus.x + mRadius * sinf(mPhi) * cosf(mTheta);
     mEyePos.z = focus.z + mRadius * sinf(mPhi) * sinf(mTheta);
     mEyePos.y = focus.y + mRadius * cosf(mPhi);
+
+    if (mHasPreviousCameraPosition)
+    {
+        const float dx = mEyePos.x - mPreviousCameraPosition.x;
+        const float dy = mEyePos.y - mPreviousCameraPosition.y;
+        const float dz = mEyePos.z - mPreviousCameraPosition.z;
+        const float deltaTime = (std::max)(gt.DeltaTime(), 0.001f);
+        const float speed = sqrtf(dx * dx + dy * dy + dz * dz) / deltaTime;
+        const float targetMotion = MathHelper::Clamp(speed / 90.0f, 0.0f, 1.0f);
+        const float blend = MathHelper::Clamp(gt.DeltaTime() * 8.0f, 0.0f, 1.0f);
+        mCameraMotionAmount += (targetMotion - mCameraMotionAmount) * blend;
+    }
+    mPreviousCameraPosition = mEyePos;
+    mHasPreviousCameraPosition = true;
+    mRenderingSystem->CameraMotionAmount() = mCameraMotionAmount;
 
     // Build the view matrix.
     XMVECTOR pos = XMVectorSet(mEyePos.x, mEyePos.y, mEyePos.z, 1.0f);
@@ -495,6 +519,7 @@ void CrateApp::UpdateLightCB(const GameTimer& gt)
     mLightCB.Directional = mDirectionalLight;
     mLightCB.PointLightCount = (int)std::min<size_t>(mPointLights.size(), MaxPointLights);
     mLightCB.SpotLightCount = (int)std::min<size_t>(mSpotLights.size(), MaxSpotLights);
+    mLightCB.Pad0.x = mRenderingSystem->CascadeColorDebugEnabled() ? 1.0f : 0.0f;
 
     for (int i = 0; i < mLightCB.PointLightCount; ++i)
         mLightCB.PointLights[i] = mPointLights[i];
@@ -565,6 +590,16 @@ void CrateApp::DrawImGui()
     ImGui::Checkbox("Vignette", &vignette);
 
     ImGui::Separator();
+    ImGui::TextUnformatted("G-buffer debug view:");
+    int& gBufferDebugMode = mRenderingSystem->GBufferDebugMode();
+    if (ImGui::Button("Lit scene [1]")) gBufferDebugMode = 0;
+    ImGui::SameLine();
+    if (ImGui::Button("Diffuse [2]")) gBufferDebugMode = 1;
+    if (ImGui::Button("Normals [3]")) gBufferDebugMode = 2;
+    ImGui::SameLine();
+    if (ImGui::Button("Depth [4]")) gBufferDebugMode = 3;
+
+    ImGui::Separator();
     ImGui::TextUnformatted("Visibility culling:");
     VisibilitySystem& visibility = mRenderingSystem->Visibility();
     bool& frustumCulling = visibility.FrustumCullingEnabled();
@@ -579,7 +614,14 @@ void CrateApp::DrawImGui()
     ImGui::Text("Submitted: %u / %zu", visibilityStats.SubmittedObjects, mAllRitems.size());
     ImGui::Text("Culled: %u", visibilityStats.CulledObjects);
     ImGui::Text("Geometry draw calls: %u", mGeometryDrawCallCount);
+    ImGui::Text("Static batches: %u (%u source meshes grouped)",
+        mStaticBatchCount, mStaticBatchedSubmeshCount);
     ImGui::Text("Boxes in instanced draw: %u", mScatteredInstancesSubmitted);
+    ImGui::Checkbox("Cascade color debug", &mRenderingSystem->CascadeColorDebugEnabled());
+    ImGui::SliderFloat("Scattered object size", &mRenderingSystem->ScatterSizeScale(),
+        0.5f, 1.5f, "%.2f");
+    ImGui::SliderFloat("Scattered color variation", &mRenderingSystem->ScatterColorVariation(),
+        0.0f, 1.0f, "%.2f");
     if (octreeCulling)
         ImGui::Text("Octree nodes tested: %u", visibilityStats.OctreeNodesTested);
 
@@ -727,7 +769,7 @@ void CrateApp::BuildShapeGeometry()
                     v.TangentU = { 1.0f, 0.0f, 0.0f, 1.0f };
 
                 if (mesh->HasTextureCoords(0))
-                    v.TexC = { mesh->mTextureCoords[0][i].x, mesh->mTextureCoords[0][i].y };
+                v.TexC = { mesh->mTextureCoords[0][i].x, mesh->mTextureCoords[0][i].y };
                 else
                     v.TexC = { 0.0f, 0.0f };
 
@@ -940,31 +982,97 @@ void CrateApp::BuildRenderItems()
     auto geo = mGeometries["objGeo"].get();
     UINT objIndex = 0;
 
-    for (auto& pair : geo->DrawArgs)
+    const auto* sourceVertices = reinterpret_cast<const Vertex*>(geo->VertexBufferCPU->GetBufferPointer());
+    const auto* sourceIndices = reinterpret_cast<const std::uint32_t*>(geo->IndexBufferCPU->GetBufferPointer());
+    for (UINT modelIndex = 0; modelIndex < mModels.size(); ++modelIndex)
     {
-        SubmeshGeometry& submesh = pair.second;
+        const LoadedModel& model = mModels[modelIndex];
+        struct MaterialBatch
+        {
+            std::vector<Vertex> Vertices;
+            std::vector<std::uint32_t> Indices;
+        };
+        std::unordered_map<UINT, MaterialBatch> batches;
 
-        auto ritem = std::make_unique<RenderItem>();
-        ritem->World = mModels.at(submesh.ModelIndex).World;
-        ritem->ObjCBIndex = objIndex++;
-        ritem->ModelIndex = submesh.ModelIndex;
-        ritem->Visibility = &mModels.at(submesh.ModelIndex).Visible;
-        ritem->Geo = geo;
-        ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST;
-        ritem->IndexCount = submesh.IndexCount;
-        ritem->StartIndexLocation = submesh.StartIndexLocation;
-        ritem->BaseVertexLocation = submesh.BaseVertexLocation;
+        for (UINT meshIndex = 0; meshIndex < model.Scene->mNumMeshes; ++meshIndex)
+        {
+            const aiMesh* mesh = model.Scene->mMeshes[meshIndex];
+            const std::string submeshName = "model" + std::to_string(modelIndex) +
+                "_mesh" + std::to_string(meshIndex);
+            const SubmeshGeometry& submesh = geo->DrawArgs.at(submeshName);
+            MaterialBatch& batch = batches[submesh.MaterialIndex];
+            const UINT baseVertex = static_cast<UINT>(batch.Vertices.size());
+            const bool bakeWorld = !model.UseDetailMaps;
+            const XMMATRIX world = XMLoadFloat4x4(&model.World);
 
-        submesh.Bounds.Transform(ritem->WorldBounds, XMLoadFloat4x4(&ritem->World));
+            for (UINT vertexIndex = 0; vertexIndex < mesh->mNumVertices; ++vertexIndex)
+            {
+                Vertex vertex = sourceVertices[submesh.BaseVertexLocation + vertexIndex];
+                if (bakeWorld)
+                {
+                    XMStoreFloat3(&vertex.Pos, XMVector3TransformCoord(XMLoadFloat3(&vertex.Pos), world));
+                    XMStoreFloat3(&vertex.Normal, XMVector3Normalize(
+                        XMVector3TransformNormal(XMLoadFloat3(&vertex.Normal), world)));
+                    XMVECTOR tangent = XMVector3Normalize(XMVector3TransformNormal(
+                        XMLoadFloat3(reinterpret_cast<const XMFLOAT3*>(&vertex.TangentU)), world));
+                    XMStoreFloat3(reinterpret_cast<XMFLOAT3*>(&vertex.TangentU), tangent);
+                }
+                batch.Vertices.push_back(vertex);
+            }
 
-        std::string matName = "mat" + std::to_string(submesh.MaterialIndex);
-        auto matIter = mMaterials.find(matName);
-        if (matIter != mMaterials.end())
-            ritem->Mat = matIter->second.get();
-        else
-            ritem->Mat = mMaterials.begin()->second.get();
+            for (UINT index = 0; index < submesh.IndexCount; ++index)
+                batch.Indices.push_back(baseVertex + sourceIndices[submesh.StartIndexLocation + index]);
+            ++mStaticBatchedSubmeshCount;
+        }
 
-        mAllRitems.push_back(std::move(ritem));
+        for (auto& entry : batches)
+        {
+            const UINT materialIndex = entry.first;
+            MaterialBatch& batch = entry.second;
+            auto batchGeo = std::make_unique<MeshGeometry>();
+            batchGeo->Name = "staticBatch_model" + std::to_string(modelIndex) +
+                "_material" + std::to_string(materialIndex);
+            const UINT vertexBytes = static_cast<UINT>(batch.Vertices.size() * sizeof(Vertex));
+            const UINT indexBytes = static_cast<UINT>(batch.Indices.size() * sizeof(std::uint32_t));
+            ThrowIfFailed(D3DCreateBlob(vertexBytes, &batchGeo->VertexBufferCPU));
+            CopyMemory(batchGeo->VertexBufferCPU->GetBufferPointer(), batch.Vertices.data(), vertexBytes);
+            ThrowIfFailed(D3DCreateBlob(indexBytes, &batchGeo->IndexBufferCPU));
+            CopyMemory(batchGeo->IndexBufferCPU->GetBufferPointer(), batch.Indices.data(), indexBytes);
+            batchGeo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(), mCommandList.Get(),
+                batch.Vertices.data(), vertexBytes, batchGeo->VertexBufferUploader);
+            batchGeo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(), mCommandList.Get(),
+                batch.Indices.data(), indexBytes, batchGeo->IndexBufferUploader);
+            batchGeo->VertexByteStride = sizeof(Vertex);
+            batchGeo->VertexBufferByteSize = vertexBytes;
+            batchGeo->IndexFormat = DXGI_FORMAT_R32_UINT;
+            batchGeo->IndexBufferByteSize = indexBytes;
+
+            SubmeshGeometry batchSubmesh;
+            batchSubmesh.IndexCount = static_cast<UINT>(batch.Indices.size());
+            BoundingBox::CreateFromPoints(batchSubmesh.Bounds, static_cast<UINT>(batch.Vertices.size()),
+                &batch.Vertices[0].Pos, sizeof(Vertex));
+            batchGeo->DrawArgs["batch"] = batchSubmesh;
+
+            auto ritem = std::make_unique<RenderItem>();
+            if (!model.UseDetailMaps)
+                XMStoreFloat4x4(&ritem->World, XMMatrixIdentity());
+            else
+                ritem->World = model.World;
+            ritem->ObjCBIndex = objIndex++;
+            ritem->ModelIndex = modelIndex;
+            ritem->Visibility = &mModels[modelIndex].Visible;
+            ritem->Geo = batchGeo.get();
+            ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST;
+            ritem->IndexCount = batchSubmesh.IndexCount;
+            ritem->Mat = mMaterials.at("mat" + std::to_string(materialIndex)).get();
+            if (model.UseDetailMaps)
+                batchSubmesh.Bounds.Transform(ritem->WorldBounds, XMLoadFloat4x4(&ritem->World));
+            else
+                ritem->WorldBounds = batchSubmesh.Bounds;
+            mAllRitems.push_back(std::move(ritem));
+            mGeometries[batchGeo->Name] = std::move(batchGeo);
+            ++mStaticBatchCount;
+        }
     }
 
     MeshGeometry* scatterGeo = mGeometries.at("lightVolumeGeo").get();

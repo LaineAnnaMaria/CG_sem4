@@ -14,6 +14,9 @@ cbuffer cbShadow : register(b1)
 struct InstanceData
 {
     float4x4 World;
+    float4 Color;
+    float Size;
+    float3 Pad;
 };
 
 StructuredBuffer<InstanceData> gInstanceData : register(t0);
@@ -35,6 +38,7 @@ VertexOut VS(VertexIn input, uint instanceId : SV_InstanceID)
 {
     VertexOut output;
     const float4x4 world = gUseInstancing != 0 ? gInstanceData[instanceId].World : gWorld;
-    output.PosH = mul(mul(float4(input.PosL, 1.0f), world), gShadowViewProj);
+    const float size = gUseInstancing != 0 ? gInstanceData[instanceId].Size : 1.0f;
+    output.PosH = mul(mul(float4(input.PosL * size, 1.0f), world), gShadowViewProj);
     return output;
 }

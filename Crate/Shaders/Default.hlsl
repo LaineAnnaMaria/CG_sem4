@@ -28,6 +28,9 @@ cbuffer cbPerObject : register(b0)
 struct InstanceData
 {
     float4x4 World;
+    float4 Color;
+    float Size;
+    float3 Pad;
 };
 
 StructuredBuffer<InstanceData> gInstanceData : register(t3);
@@ -96,6 +99,7 @@ struct DomainOut
     float3 NormalW  : NORMAL;
     float4 TangentW : TANGENT;
     float2 TexC     : TEXCOORD;
+    float4 InstanceColor : COLOR;
 };
 
 HullIn VS(VertexIn vin, uint instanceId : SV_InstanceID)
@@ -160,6 +164,11 @@ DomainOut DS(HullPatchConstants patchConstants, float3 bary : SV_DomainLocation,
     float4 tangentL = bary.x * patch[0].TangentL + bary.y * patch[1].TangentL + bary.z * patch[2].TangentL;
     tangentL.xyz = normalize(tangentL.xyz);
     output.TexC = bary.x * patch[0].TexC + bary.y * patch[1].TexC + bary.z * patch[2].TexC;
+    output.InstanceColor = gUseInstancing != 0
+        ? gInstanceData[patch[0].InstanceId].Color
+        : float4(1.0f, 1.0f, 1.0f, 1.0f);
+    if (gUseInstancing != 0)
+        posL *= gInstanceData[patch[0].InstanceId].Size;
 
     if (gUseDisplacementMap != 0)
     {
@@ -168,6 +177,19 @@ DomainOut DS(HullPatchConstants patchConstants, float3 bary : SV_DomainLocation,
         // is maximum outward displacement. Centering around 0.5 pushed most of
         // the walnut inward because its map is predominantly below mid-gray.
         posL += normalL * (height * gDisplacementScale);
+
+        // A localized pulse starts at the walnut's vertical center and travels
+        // toward both ends. The absolute distance makes the two fronts move
+        // upward and downward at the same time.
+        const float walnutCenterY = 12.682f;
+        const float pulseSpeed = 7.0f;
+        const float pulseRepeat = 14.0f;
+        const float pulseWidth = 0.75f;
+        const float pulseAmplitude = 0.45f;
+        const float distanceFromCenter = abs(posL.y - walnutCenterY);
+        const float pulseFront = fmod(gTotalTime * pulseSpeed, pulseRepeat);
+        const float pulseOffset = pulseAmplitude * exp(-pow((distanceFromCenter - pulseFront) / pulseWidth, 2.0f));
+        posL.y += (posL.y < walnutCenterY ? -pulseOffset : pulseOffset);
     }
 
     const float4x4 world = WorldMatrix(patch[0].InstanceId);
@@ -182,7 +204,8 @@ DomainOut DS(HullPatchConstants patchConstants, float3 bary : SV_DomainLocation,
 GBuffer PS(DomainOut pin)
 {
     GBuffer output;
-    output.diffuse = gDiffuseAlbedo * gDiffuseMap.Sample(anisotropicWrap, pin.TexC);
+    output.diffuse = gDiffuseAlbedo * pin.InstanceColor *
+        gDiffuseMap.Sample(anisotropicWrap, pin.TexC);
 
     float3 normalW = normalize(pin.NormalW);
     if (gUseNormalMap != 0)

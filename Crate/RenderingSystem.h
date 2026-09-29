@@ -87,6 +87,11 @@ public:
     bool& ParticlesEnabled() { return _particlesEnabled; }
     bool& ChromaticAberrationEnabled() { return _chromaticAberrationEnabled; }
     bool& VignetteEnabled() { return _vignetteEnabled; }
+    int& GBufferDebugMode() { return _gBufferDebugMode; }
+    float& ScatterSizeScale() { return _scatterSizeScale; }
+    float& ScatterColorVariation() { return _scatterColorVariation; }
+    bool& CascadeColorDebugEnabled() { return _cascadeColorDebugEnabled; }
+    float& CameraMotionAmount() { return _cameraMotionAmount; }
 
 private:
     RenderStats GeometryPass(const FrameContext& context);
@@ -134,4 +139,9 @@ private:
     bool _particlesEnabled = true;
     bool _chromaticAberrationEnabled = false;
     bool _vignetteEnabled = false;
+    int _gBufferDebugMode = 0;
+    float _scatterSizeScale = 1.0f;
+    float _scatterColorVariation = 0.65f;
+    bool _cascadeColorDebugEnabled = false;
+    float _cameraMotionAmount = 0.0f;
 };

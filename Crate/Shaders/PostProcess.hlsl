@@ -7,6 +7,8 @@ cbuffer PostProcessSettings : register(b0)
 {
     uint gChromaticAberrationEnabled;
     uint gVignetteEnabled;
+    uint gGBufferDebugMode;
+    float gCameraMotionAmount;
 };
 
 float4 PS(FullscreenVertexOut input) : SV_Target
@@ -16,13 +18,16 @@ float4 PS(FullscreenVertexOut input) : SV_Target
     gSceneColor.GetDimensions(width, height);
 
     const float2 uv = input.PosH.xy / float2(width, height);
+    if (gGBufferDebugMode != 0)
+        return gSceneColor.SampleLevel(gLinearClamp, uv, 0);
     const float2 fromCenter = uv - 0.5f;
 
     float3 color;
     if (gChromaticAberrationEnabled != 0)
     {
         // Separate red and blue increasingly toward the image border.
-        const float radialAmount = dot(fromCenter, fromCenter) * 0.045f;
+        const float cameraBoost = 1.0f + 1.5f * saturate(gCameraMotionAmount);
+        const float radialAmount = dot(fromCenter, fromCenter) * 0.055f * cameraBoost;
         const float2 offset = fromCenter * radialAmount;
         color.r = gSceneColor.SampleLevel(gLinearClamp, uv + offset, 0).r;
         color.g = gSceneColor.SampleLevel(gLinearClamp, uv, 0).g;

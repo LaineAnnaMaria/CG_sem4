@@ -243,6 +243,14 @@ RenderingSystem::RenderStats RenderingSystem::DrawRenderItems(const FrameContext
             InstanceData instanceData;
             XMStoreFloat4x4(&instanceData.World,
                 XMMatrixTranspose(XMLoadFloat4x4(&item->World)));
+            const float colorAmount = _scatterColorVariation;
+            instanceData.Color = {
+                1.0f + (item->InstanceColor.x - 1.0f) * colorAmount,
+                1.0f + (item->InstanceColor.y - 1.0f) * colorAmount,
+                1.0f + (item->InstanceColor.z - 1.0f) * colorAmount,
+                1.0f
+            };
+            instanceData.Size = item->InstanceSize * _scatterSizeScale;
             instanceUploadBuffer->CopyData(scatteredCount++, instanceData);
             continue;
         }
@@ -313,11 +321,18 @@ void RenderingSystem::AppendScatteredBoxes(std::vector<std::unique_ptr<RenderIte
             const float scale = 1.4f + 0.35f * sinf(static_cast<float>(x * 13 + z * 7));
             const float worldY = -3.0f + 2.0f * sinf(static_cast<float>(x) * 0.47f) *
                 cosf(static_cast<float>(z) * 0.39f);
-            const XMMATRIX world = XMMatrixScaling(scale, scale, scale) *
-                XMMatrixRotationY(0.31f * static_cast<float>(x + z)) *
+            const XMMATRIX world = XMMatrixRotationY(0.31f * static_cast<float>(x + z)) *
                 XMMatrixTranslation(worldX, worldY, worldZ);
 
             XMStoreFloat4x4(&item->World, world);
+            item->InstanceSize = scale;
+            const float seed = static_cast<float>(x * 31 + z * 17);
+            item->InstanceColor = {
+                0.65f + 0.35f * (0.5f + 0.5f * sinf(seed * 0.17f)),
+                0.65f + 0.35f * (0.5f + 0.5f * sinf(seed * 0.23f + 2.1f)),
+                0.65f + 0.35f * (0.5f + 0.5f * sinf(seed * 0.31f + 4.2f)),
+                1.0f
+            };
             item->ObjCBIndex = nextObjectIndex++;
             item->ModelIndex = UINT_MAX;
             item->Geo = geometry;
@@ -328,7 +343,7 @@ void RenderingSystem::AppendScatteredBoxes(std::vector<std::unique_ptr<RenderIte
             item->BaseVertexLocation = submesh.BaseVertexLocation;
             item->IsScatteredObject = true;
             item->Visibility = visibility;
-            submesh.Bounds.Transform(item->WorldBounds, world);
+            submesh.Bounds.Transform(item->WorldBounds, XMMatrixScaling(scale, scale, scale) * world);
             items.push_back(std::move(item));
         }
     }
@@ -410,14 +425,25 @@ void RenderingSystem::PostProcessPass(const FrameContext& context) const
 
     ID3D12DescriptorHeap* descriptorHeaps[] = { context.GBufferTarget->SRVHeap() };
     cmdList->SetDescriptorHeaps(1, descriptorHeaps);
-    cmdList->SetGraphicsRootDescriptorTable(0, context.GBufferTarget->SceneColorSrvGpu());
+    const auto sourceSrv = _gBufferDebugMode == 0
+        ? context.GBufferTarget->SceneColorSrvGpu()
+        : context.GBufferTarget->InfoSrvGpu(static_cast<GBufferInfo>(_gBufferDebugMode - 1));
+    cmdList->SetGraphicsRootDescriptorTable(0, sourceSrv);
 
-    const UINT settings[] =
+    struct PostProcessSettings
+    {
+        UINT ChromaticAberrationEnabled;
+        UINT VignetteEnabled;
+        UINT GBufferDebugMode;
+        float CameraMotionAmount;
+    } settings =
     {
         _chromaticAberrationEnabled ? 1u : 0u,
-        _vignetteEnabled ? 1u : 0u
+        _vignetteEnabled ? 1u : 0u,
+        static_cast<UINT>(_gBufferDebugMode),
+        _cameraMotionAmount
     };
-    cmdList->SetGraphicsRoot32BitConstants(1, _countof(settings), settings, 0);
+    cmdList->SetGraphicsRoot32BitConstants(1, 4, &settings, 0);
     cmdList->IASetVertexBuffers(0, 0, nullptr);
     cmdList->IASetIndexBuffer(nullptr);
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -528,7 +554,7 @@ void RenderingSystem::BuildRootSignatures(ID3D12Device* device)
         CD3DX12_ROOT_PARAMETER slotRootParameter[2];
         slotRootParameter[0].InitAsDescriptorTable(1, &sceneColorTable,
             D3D12_SHADER_VISIBILITY_PIXEL);
-        slotRootParameter[1].InitAsConstants(2, 0, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+        slotRootParameter[1].InitAsConstants(4, 0, 0, D3D12_SHADER_VISIBILITY_PIXEL);
 
         const CD3DX12_STATIC_SAMPLER_DESC linearClampSampler(
             0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,

@@ -142,33 +142,52 @@ struct GeometryOut
     float4 Color : COLOR;
 };
 
-[maxvertexcount(4)]
+[maxvertexcount(36)]
 void GS(point VertexOut input[1], inout TriangleStream<GeometryOut> outputStream)
 {
     const float3 center = input[0].PositionW;
-    float3 normal = normalize(gEyePosW - center);
-    const float3 referenceUp = abs(normal.y) > 0.98f
-        ? float3(1.0f, 0.0f, 0.0f)
-        : float3(0.0f, 1.0f, 0.0f);
-    const float3 right = normalize(cross(referenceUp, normal));
-    const float3 up = normalize(cross(normal, right));
     const float halfSize = 0.5f * input[0].Size;
-    const float3 corners[4] =
+    const float3 corners[8] =
     {
-        center - right * halfSize - up * halfSize,
-        center - right * halfSize + up * halfSize,
-        center + right * halfSize - up * halfSize,
-        center + right * halfSize + up * halfSize
+        center + float3(-halfSize, -halfSize, -halfSize),
+        center + float3(-halfSize,  halfSize, -halfSize),
+        center + float3( halfSize,  halfSize, -halfSize),
+        center + float3( halfSize, -halfSize, -halfSize),
+        center + float3(-halfSize, -halfSize,  halfSize),
+        center + float3(-halfSize,  halfSize,  halfSize),
+        center + float3( halfSize,  halfSize,  halfSize),
+        center + float3( halfSize, -halfSize,  halfSize)
+    };
+    const uint faceIndices[36] =
+    {
+        0, 1, 2, 0, 2, 3, // -Z
+        7, 6, 5, 7, 5, 4, // +Z
+        4, 5, 1, 4, 1, 0, // -X
+        3, 2, 6, 3, 6, 7, // +X
+        1, 5, 6, 1, 6, 2, // +Y
+        4, 0, 3, 4, 3, 7  // -Y
+    };
+    const float3 faceNormals[6] =
+    {
+        float3(0.0f, 0.0f, -1.0f), float3(0.0f, 0.0f, 1.0f),
+        float3(-1.0f, 0.0f, 0.0f), float3(1.0f, 0.0f, 0.0f),
+        float3(0.0f, 1.0f, 0.0f), float3(0.0f, -1.0f, 0.0f)
     };
 
     [unroll]
-    for (uint i = 0; i < 4; ++i)
+    for (uint face = 0; face < 6; ++face)
     {
-        GeometryOut output;
-        output.PositionH = mul(float4(corners[i], 1.0f), gViewProj);
-        output.NormalW = normal;
-        output.Color = input[0].Color;
-        outputStream.Append(output);
+        [unroll]
+        for (uint corner = 0; corner < 6; ++corner)
+        {
+            GeometryOut output;
+            output.PositionH = mul(float4(corners[faceIndices[face * 6 + corner]], 1.0f), gViewProj);
+            output.NormalW = faceNormals[face];
+            output.Color = input[0].Color;
+            outputStream.Append(output);
+            if (corner == 2 || corner == 5)
+                outputStream.RestartStrip();
+        }
     }
 }
 

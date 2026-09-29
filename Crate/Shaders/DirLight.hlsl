@@ -109,7 +109,7 @@ float3 ApplyLight(float3 albedo, float3 normal, float3 viewDir, float3 lightDir,
     return albedo * lightColor * nDotL * intensity + lightColor * specular * 0.25f * intensity;
 }
 
-float CascadeShadowFactor(float3 posW, float3 normalW, float3 lightDir)
+float CascadeShadowFactor(float3 posW, float3 normalW, float3 lightDir, out int selectedCascade)
 {
     const float viewDepth = mul(float4(posW, 1.0f), gView).z;
     int cascadeIndex = SHADOW_CASCADE_COUNT - 1;
@@ -122,6 +122,7 @@ float CascadeShadowFactor(float3 posW, float3 normalW, float3 lightDir)
             break;
         }
     }
+    selectedCascade = cascadeIndex;
 
     const float4 lightPosition = mul(float4(posW, 1.0f), gCascades[cascadeIndex].ViewProj);
     const float3 ndc = lightPosition.xyz / lightPosition.w;
@@ -168,9 +169,21 @@ float4 PS(FullscreenVertexOut pin) : SV_Target
     float3 color = albedo.rgb * gAmbientStrength;
 
     float3 directionalDir = normalize(-gDirectional.Direction);
-    const float shadow = CascadeShadowFactor(posW, normal, directionalDir);
+    int cascadeIndex;
+    const float shadow = CascadeShadowFactor(posW, normal, directionalDir, cascadeIndex);
     color += shadow * ApplyLight(albedo.rgb, normal, viewDir, directionalDir,
         gDirectional.Color, gDirectional.Intensity);
+
+    if (gPad0.x > 0.5f)
+    {
+        const float3 cascadeColors[SHADOW_CASCADE_COUNT] =
+        {
+            float3(1.0f, 0.16f, 0.12f),
+            float3(0.12f, 1.0f, 0.20f),
+            float3(0.16f, 0.35f, 1.0f)
+        };
+        color = lerp(color, cascadeColors[cascadeIndex], 0.65f);
+    }
 
     return float4(saturate(color), 1.0f);
 }
